@@ -1,4 +1,4 @@
-"""Hanish — Temporal Cognitive Substrate, V0.1.
+"""Hanish — Temporal Cognitive Substrate, V0.2.
 
 A type system for time plus a scoreboard. The core is a lattice, oldest to
 newest:

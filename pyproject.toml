@@ -4,13 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hanish"
-version = "0.1.2"
+version = "0.2.0"
 description = "Hanish — a type system for time plus a scoreboard"
 readme = "README.md"
 requires-python = ">=3.11"
 # The core has zero runtime dependencies by design. A substrate with a
 # dependency tree is a substrate that rots.
 dependencies = []
+
+[project.scripts]
+hanish-ci = "hanish.adapters.ci_cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6"]
