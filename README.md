@@ -9,7 +9,7 @@ recording or a missing answer turn into a lie.
 Think of it as the smallest notebook that can't cheat itself.
 
 ```bash
-python3 -m pytest tests/ -q      # 31 tests, all green
+python3 -m pytest tests/ -q      # v0.1.2 baseline: 41; the current suite must pass
 python3 demo.py                  # three end-to-end scenarios, one read
 ```
 
@@ -34,10 +34,11 @@ point, and it's in the name of the game below.
 
 **For the artist's eye:** think of Hanish as a *cognitive darkroom*. The ledger
 is the negative — append-only, light-tight, never retouched. `BLIND` versus
-`EXPOSED` isn't a metaphor: it *is* photography. A forecast is `BLIND` when
-nothing that could affect its target ever saw it. The moment it's visible to
-anyone who could move the outcome, the film is exposed — the image may be
-interesting, but it can no longer count as calibration.
+`EXPOSED` isn't a metaphor: it *is* photography. `BLIND` requires complete,
+disjoint accounts of who saw the forecast and who could move its target, plus
+a named separation control and host attestation. Missing or uncertain proof
+defaults to `EXPOSED`. An exposed image may be interesting, but it cannot count
+as calibration.
 
 ---
 
@@ -122,16 +123,17 @@ system shrugs, counts it, keeps going. And because records carry a schema
 version, a record written by a *newer* Hanish fails loudly instead of being
 silently misread by an older one.
 
-## The four identities — don't collapse them
+## The identities — don't collapse them
 
 Collapsing any two of these corrupts calibration.
 
 | identity | answers | example |
 |---|---|---|
-| `source_ref` | who emitted it | `github-actions` |
-| `event_id` | which emission is this | `run-481:attempt-2:required_checks` |
+| `source_ref` | who emitted it | `github-actions:JosephOIbrahim/Hanish` |
+| `event_id` | which emission is this | `run-481:attempt-2:leg-python-3.13` |
 | `subject_ref` | what it's about | `git:abc123` |
-| `world_ref` | what was known when authored | `world:d39bb3bb9a76` |
+| `epoch_ref` | which bounded stream emitted it | repository + workflow + run + attempt |
+| `world_ref` | what was known when authored | `world:sha256:<64 hex>` |
 
 Two CI attempts on one commit are **two events about one subject** — not
 duplicates. Only the first *valid* one scores. Retrying until green is the
@@ -161,12 +163,20 @@ Separating these tells a real failure from a confusing one.
 
 ## The frontier
 
-Hanish is being hardened **by the system itself**. A 20-role team in
-`harness/` runs on Hanish's own substrate — forecasting its own gates,
-observing its own test results, resolving its own verdicts. The first
-self-forecast — *"flight past lands gates G1–G5 and G7 green,"* p=0.75 — was
-**resolved HIT** by the substrate, scored on its own ledger. You wake up to a
-digest, not to a process.
+Historical correction: the 20-role harness was a design and operator-driven
+session, not an autonomous second host. Its first self-forecast,
+`f_c57a1c3bc61f`, was labelled `BLIND` even though its author directed work
+capable of moving the target gates. The evidence used a synthetic
+`run_id="flight-past"`; CI did not autonomously capture it. The gitignored raw
+root is unavailable, so Hanish does not invent its bytes, timestamps, or a
+receipt. The append-only policy record in
+`experiments/calibration-exclusions.jsonl` excludes it. The published
+calibration corpus therefore contains zero eligible samples.
+
+V0.2 turns the CI-compatible adapter into a real Host 0 path and publishes
+verified, immutable receipts for authoritative runs. Its operational forecast
+is deliberately `EXPOSED`: the first receipt proves capture and completeness,
+not calibration.
 
 ## Deliberately absent
 
@@ -174,18 +184,24 @@ Not oversights. Each belongs to a later version; adding them now would freeze a
 design nothing has run against yet.
 
 `decay` · `calibration buckets` · `Brier aggregation` · `tiers` · `promotion` ·
-`drift` · `model calls` · `distributed transport` · `InterventionEvent` · USD
+`drift` · `model calls` · `distributed transport in the core` ·
+`InterventionEvent` · USD
+
+The prospective component formerly called **Prospect** is now **Hanish**.
+Historical wave prompts retain the former name as quoted provenance. The
+Moneta + Octavius + Hanish temporal ablation has not started.
 
 ## Next
 
 - **V0.1** — done: the lattice, damage tolerance, cross-process once-only,
   schema versioning, never-raise.
-- **V0.2** — host Ω adversarial conformance harness, fault injection,
-  out-of-order events, gaps, schema evolution. **Hard gate: V0.3 cannot begin
-  until every V0.2 gate is green.**
+- **V0.2** — trustworthy exposure, deterministic replay, bounded capture,
+  autonomous Host 0, immutable receipts, and Host Ω adversarial conformance.
+  **Hard gate: V0.3 cannot begin until every V0.2 gate is green.**
 - **V0.3** — model-authored forecasts, sealed `BLIND` by construction. First
   publishable result.
 
 ---
 
-[CHANGELOG](CHANGELOG.md) · [harness](/harness) · 31 tests, all green
+[CHANGELOG](CHANGELOG.md) · [harness](/harness) · v0.1.2 baseline: 41 tests;
+run the current gates for the live count
