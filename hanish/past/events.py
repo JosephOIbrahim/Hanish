@@ -56,7 +56,7 @@ class ObservationEvent:
         return (self.source_ref, self.event_id)
 
 
-@dataclass
+@dataclass(frozen=True)
 class CompletenessSeal:
     """Asserted at a natural boundary by the host: 'this stream is finished,
     and it emitted exactly this many records.' Without a seal the substrate
@@ -67,9 +67,24 @@ class CompletenessSeal:
     final_source_seq: int
     complete: bool = True
     sealed_at: str = field(default_factory=now)
+    # Last to preserve the v1 positional constructor contract. V1 records and
+    # compatibility callers omit it and migrate to subject == epoch; v2 hosts
+    # pass the independently stable subject explicitly.
+    subject_ref: str | None = None
+
+    def __post_init__(self) -> None:
+        subject = self.epoch_ref if self.subject_ref is None else self.subject_ref
+        for value, name in (
+            (self.source_ref, "source_ref"),
+            (self.epoch_ref, "epoch_ref"),
+            (subject, "subject_ref"),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"seal {name} must be a non-empty string")
+        object.__setattr__(self, "subject_ref", subject)
 
 
-@dataclass
+@dataclass(frozen=True)
 class Outcome:
     forecast_id: str
     terminal: Terminal
@@ -94,8 +109,13 @@ def observation_from_dict(d: dict) -> ObservationEvent:
     return ObservationEvent(**d)
 
 
-def seal_from_dict(d: dict) -> CompletenessSeal:
-    return CompletenessSeal(**d)
+def seal_from_dict(d: dict, *, schema_version: int = 1) -> CompletenessSeal:
+    payload = dict(d)
+    if schema_version == 1:
+        payload.setdefault("subject_ref", payload.get("epoch_ref"))
+    elif "subject_ref" not in payload:
+        raise ValueError("schema-v2 seal requires subject_ref")
+    return CompletenessSeal(**payload)
 
 
 def outcome_from_dict(d: dict) -> Outcome:

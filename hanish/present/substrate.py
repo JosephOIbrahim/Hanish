@@ -17,15 +17,20 @@ No scheduler on the epistemic path: resolution happens when someone asks.
 
 from __future__ import annotations
 
+import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from ..future.claims import (
     Adjudication,
     Exposure,
+    ExposureAmendment,
     Forecast,
     ObservableSpec,
+    exposure_amendment_from_dict,
     forecast_from_dict,
+    validate_world_contract,
 )
 from ..future.scoring import brier, compare
 from ..past.events import (
@@ -40,6 +45,11 @@ from ..past.events import (
 )
 from ..past.ledger import LEDGER_SCHEMA, Ledger, to_json
 from ..time import now, parse
+
+_SCHEMA_V2 = 2
+_FORECAST_KIND = "forecast"
+_AMENDMENT_KIND = "exposure_amendment"
+_OUTCOME_KIND = "outcome"
 
 
 class Substrate:
@@ -58,9 +68,16 @@ class Substrate:
         self.forecasts: dict[str, Forecast] = {}
         self.index: dict[tuple, list[str]] = {}      # (subject, observable) -> [forecast_id]
         self.outcomes: dict[str, Outcome] = {}
+        self.amendments: list[ExposureAmendment] = []
+        self._forecast_versions: dict[str, int] = {}
+        self._forecast_digests: dict[str, str] = {}
+        self._base_exposure: dict[str, Exposure] = {}
+        self._effective_exposure: dict[str, Exposure] = {}
+        self._exposure_quarantined: set[str] = set()
         self._seen: set[tuple] = set()               # (source_ref, event_id)
         self._observations: list[ObservationEvent] = []
         self._seals: dict[tuple, CompletenessSeal] = {}   # (source_ref, epoch_ref)
+        self._seal_versions: dict[tuple, int] = {}
 
         # Capture health. Not epistemic -- operational.
         self.dropped = 0
@@ -87,23 +104,83 @@ class Substrate:
         The one intentional exception is schema versioning: a record from a
         NEWER writer fails loud (G4), because silently misreading a future
         format is how corruption enters a calibration feed."""
-        for rec in self.forecasts_l.raw():
-            if not self._version_ok(rec, self.forecasts_l):
+        pending_amendments: list[tuple[ExposureAmendment | None, str | None]] = []
+        for record in self.forecasts_l.raw():
+            version = self._record_version(record, self.forecasts_l)
+            if version is None:
+                pending_amendments.append((None, record.get("forecast_id")))
                 continue
-            try:
-                f = forecast_from_dict(rec)
-            except (KeyError, TypeError, ValueError):
+            kind = record.get("_kind")
+            payload = _without_envelope(record)
+            if version == 1:
+                if kind is not None or {
+                    "exposure_basis",
+                    "world_commitment",
+                }.intersection(payload):
+                    self.forecasts_l.corrupted += 1
+                    pending_amendments.append((None, payload.get("forecast_id")))
+                    continue
+                record_kind = _FORECAST_KIND
+            else:
+                record_kind = kind
+            if record_kind == _FORECAST_KIND:
+                try:
+                    forecast = forecast_from_dict(payload, schema_version=version)
+                except (KeyError, TypeError, ValueError):
+                    self.forecasts_l.corrupted += 1
+                    pending_amendments.append((None, payload.get("forecast_id")))
+                    continue
+                if forecast.forecast_id in self.forecasts:
+                    # Forecast identity is first-write authoritative.  A
+                    # conflicting later declaration makes the identity unsafe
+                    # for calibration but never replaces history.
+                    self.forecasts_l.corrupted += 1
+                    self._quarantine_exposure(forecast.forecast_id)
+                    continue
+                if (
+                    version == _SCHEMA_V2
+                    and forecast.exposure is Exposure.BLIND
+                    and forecast.structural_exposure is not Exposure.BLIND
+                ):
+                    self.forecasts_l.corrupted += 1
+                    self._exposure_quarantined.add(forecast.forecast_id)
+                self._register(
+                    forecast,
+                    version=version,
+                    digest=_canonical_record_digest(record),
+                )
+            elif version == _SCHEMA_V2 and record_kind == _AMENDMENT_KIND:
+                target_hint = payload.get("forecast_id")
+                try:
+                    amendment = exposure_amendment_from_dict(payload)
+                except (KeyError, TypeError, ValueError):
+                    self.forecasts_l.corrupted += 1
+                    pending_amendments.append((None, target_hint))
+                    continue
+                pending_amendments.append((amendment, amendment.forecast_id))
+            else:
                 self.forecasts_l.corrupted += 1
-                continue
-            self._register(f)
+                target_hint = payload.get("forecast_id")
+                pending_amendments.append((None, target_hint))
 
-        for rec in self.evidence_l.raw():
-            kind = rec.pop("_kind", None)
-            if not self._version_ok(rec, self.evidence_l):
+        # A correction can only be interpreted after its target declaration.
+        # Folding in a second pass also makes duplicate amendments idempotent.
+        for amendment, target_hint in pending_amendments:
+            if amendment is None:
+                if isinstance(target_hint, str):
+                    self._quarantine_exposure(target_hint)
                 continue
+            self._apply_amendment(amendment, rebuilding=True)
+
+        for record in self.evidence_l.raw():
+            version = self._record_version(record, self.evidence_l)
+            if version is None:
+                continue
+            kind = record.get("_kind")
+            payload = _without_envelope(record)
             if kind == "observation":
                 try:
-                    obs = observation_from_dict(rec)
+                    obs = observation_from_dict(payload)
                 except (KeyError, TypeError, ValueError):
                     self.evidence_l.corrupted += 1
                     continue
@@ -111,46 +188,64 @@ class Substrate:
                 self._observations.append(obs)
             elif kind == "seal":
                 try:
-                    seal = seal_from_dict(rec)
+                    seal = seal_from_dict(payload, schema_version=version)
                 except (KeyError, TypeError, ValueError):
                     self.evidence_l.corrupted += 1
                     continue
-                self._seals[(seal.source_ref, seal.epoch_ref)] = seal
+                seal_key = (seal.source_ref, seal.epoch_ref)
+                self._seals[seal_key] = seal
+                self._seal_versions[seal_key] = version
             else:
                 self.evidence_l.corrupted += 1
-                continue
 
-        for rec in self.outcomes_l.raw():
-            if not self._version_ok(rec, self.outcomes_l):
+        for record in self.outcomes_l.raw():
+            version = self._record_version(record, self.outcomes_l)
+            if version is None:
+                continue
+            kind = record.get("_kind")
+            if version == 1:
+                if kind is not None:
+                    self.outcomes_l.corrupted += 1
+                    continue
+            elif kind != _OUTCOME_KIND:
+                self.outcomes_l.corrupted += 1
                 continue
             try:
-                o = outcome_from_dict(rec)
+                outcome = outcome_from_dict(_without_envelope(record))
             except (KeyError, TypeError, ValueError):
                 self.outcomes_l.corrupted += 1
                 continue
-            self.outcomes[o.forecast_id] = o
+            self.outcomes[outcome.forecast_id] = self._fold_outcome_exposure(outcome)
 
     @staticmethod
-    def _version_ok(rec: dict, ledger: Ledger) -> bool:
-        """Gate the schema version of one record; True means readable.
-
-        A record without a version tag is v1. A non-integer tag is
-        corruption. A tag NEWER than this reader fails loud -- older code
-        must never silently misread newer data. Pops the tag so decoders
-        never see a field they do not know."""
-        version = rec.pop("_v", 1)
-        if isinstance(version, bool) or not isinstance(version, int):
+    def _record_version(rec: dict, ledger: Ledger) -> int | None:
+        """Return a supported record version without mutating its payload."""
+        version = rec.get("_v", 1)
+        if (
+            isinstance(version, bool)
+            or not isinstance(version, int)
+            or version <= 0
+        ):
             ledger.corrupted += 1
-            return False
-        if version > LEDGER_SCHEMA:
+            return None
+        if version > _SCHEMA_V2:
             raise ValueError(
                 f"ledger written by schema v{version}; this reader "
-                f"understands up to v{LEDGER_SCHEMA}"
+                f"understands up to v{_SCHEMA_V2}"
             )
-        return True
+        return version
 
-    def _register(self, f: Forecast) -> None:
+    def _register(self, f: Forecast, *, version: int, digest: str) -> None:
         self.forecasts[f.forecast_id] = f
+        self._forecast_versions[f.forecast_id] = version
+        self._forecast_digests[f.forecast_id] = digest
+        base = f.exposure if version == 1 else f.structural_exposure
+        self._base_exposure[f.forecast_id] = base
+        self._effective_exposure[f.forecast_id] = (
+            Exposure.EXPOSED
+            if f.forecast_id in self._exposure_quarantined
+            else base
+        )
         key = (f.subject_ref, f.resolution.observable)
         self.index.setdefault(key, []).append(f.forecast_id)
 
@@ -167,17 +262,186 @@ class Substrate:
         rejected later, not resolved UNRESOLVABLE later. Refused here.
 
         An unfalsifiable claim is free to produce and therefore worthless."""
-        obs_name = forecast.resolution.observable
+        if not isinstance(forecast, Forecast):
+            raise TypeError("author() requires a Forecast")
+        payload = _tag_v2(forecast, _FORECAST_KIND)
+        # Register the value decoded from the exact bytes about to be
+        # persisted, never the caller-owned object.  This also validates that
+        # every nested value survives canonical serialization.
+        detached = forecast_from_dict(
+            _without_envelope(payload),
+            schema_version=_SCHEMA_V2,
+        )
+        obs_name = detached.resolution.observable
         if obs_name not in self.observables:
             raise ValueError(
                 f"undeclared observable {obs_name!r}: a forecast must name "
                 f"something the host actually emits"
             )
-        if forecast.forecast_id in self.forecasts:
-            raise ValueError(f"forecast {forecast.forecast_id} already exists")
-        self.forecasts_l.append_dict(_tag_record(forecast))
-        self._register(forecast)
-        return forecast.forecast_id
+        if (
+            detached.exposure is Exposure.BLIND
+            and detached.structural_exposure is not Exposure.BLIND
+        ):
+            raise ValueError("BLIND forecast requires a complete, disjoint exposure basis")
+        validate_world_contract(detached, schema_version=_SCHEMA_V2)
+        if detached.forecast_id in self.forecasts:
+            raise ValueError(f"forecast {detached.forecast_id} already exists")
+        self.forecasts_l.append_dict(payload)
+        self._register(
+            detached,
+            version=_SCHEMA_V2,
+            digest=_canonical_record_digest(payload),
+        )
+        return detached.forecast_id
+
+    def forecast_digest(self, forecast_id: str) -> str:
+        """Canonical digest to which an exposure amendment must bind."""
+        try:
+            return self._forecast_digests[forecast_id]
+        except KeyError:
+            raise KeyError(f"unknown forecast {forecast_id}") from None
+
+    def effective_exposure(self, forecast_id: str) -> Exposure:
+        """Exposure after structural validation and monotone amendments."""
+        try:
+            return self._effective_exposure[forecast_id]
+        except KeyError:
+            raise KeyError(f"unknown forecast {forecast_id}") from None
+
+    def amend_exposure(self, amendment: ExposureAmendment) -> None:
+        """Append a digest-bound BLIND -> EXPOSED correction.
+
+        This is an authoring API, not a host capture path: malformed requests
+        raise before anything is appended.  Replaying the same valid
+        amendment remains effect-idempotent.
+        """
+        if not isinstance(amendment, ExposureAmendment):
+            raise TypeError("amend_exposure() requires an ExposureAmendment")
+        payload = _tag_v2(amendment, _AMENDMENT_KIND)
+        detached = exposure_amendment_from_dict(_without_envelope(payload))
+        error = self._amendment_error(detached)
+        if error is not None:
+            raise ValueError(error)
+        result = self.forecasts_l.compare_and_append(
+            payload,
+            ("_kind", "forecast_id", "target_forecast_digest"),
+            lambda _existing, _candidate: True,
+        )
+        # compare_and_append synchronized the complete durable tail under the
+        # same lock as its decision.  Merge every discovered record, not just
+        # our candidate, so a race cannot disappear until restart.
+        self._merge_forecast_tail(result.records)
+        if result.conflict:
+            raise ValueError("conflicting exposure amendment transition")
+
+    def _amendment_error(self, amendment: ExposureAmendment) -> str | None:
+        forecast = self.forecasts.get(amendment.forecast_id)
+        if forecast is None:
+            return f"unknown forecast {amendment.forecast_id}"
+        if self._forecast_digests[amendment.forecast_id] != amendment.target_forecast_digest:
+            return "exposure amendment target digest does not match forecast"
+        if self._base_exposure[amendment.forecast_id] is not Exposure.BLIND:
+            return "exposure amendment target was not structurally BLIND"
+        try:
+            if parse(amendment.amended_at) < parse(forecast.created_at):
+                return "exposure amendment predates its target forecast"
+        except (TypeError, ValueError):
+            return "exposure amendment timestamp cannot be compared with target"
+        return None
+
+    def _apply_amendment(
+        self,
+        amendment: ExposureAmendment,
+        *,
+        rebuilding: bool,
+    ) -> bool:
+        error = self._amendment_error(amendment)
+        if error is not None:
+            if amendment.forecast_id in self.forecasts:
+                self._quarantine_exposure(amendment.forecast_id)
+            if rebuilding:
+                self.forecasts_l.corrupted += 1
+                return False
+            raise ValueError(error)
+        if amendment not in self.amendments:
+            self.amendments.append(amendment)
+        self._effective_exposure[amendment.forecast_id] = Exposure.EXPOSED
+        existing = self.outcomes.get(amendment.forecast_id)
+        if existing is not None:
+            self.outcomes[amendment.forecast_id] = self._fold_outcome_exposure(existing)
+        return True
+
+    def _merge_forecast_tail(self, records: tuple[dict, ...]) -> None:
+        """Fold forecast-ledger records discovered by an atomic append."""
+        pending: list[tuple[ExposureAmendment | None, str | None]] = []
+        for record in records:
+            version = self._record_version(record, self.forecasts_l)
+            if version is None:
+                pending.append((None, record.get("forecast_id")))
+                continue
+            kind = record.get("_kind")
+            payload = _without_envelope(record)
+            if version == 1:
+                if kind is not None or {
+                    "exposure_basis",
+                    "world_commitment",
+                }.intersection(payload):
+                    self.forecasts_l.corrupted += 1
+                    pending.append((None, payload.get("forecast_id")))
+                    continue
+                record_kind = _FORECAST_KIND
+            else:
+                record_kind = kind
+
+            if record_kind == _FORECAST_KIND:
+                try:
+                    forecast = forecast_from_dict(payload, schema_version=version)
+                except (KeyError, TypeError, ValueError):
+                    self.forecasts_l.corrupted += 1
+                    pending.append((None, payload.get("forecast_id")))
+                    continue
+                digest = _canonical_record_digest(record)
+                existing_digest = self._forecast_digests.get(forecast.forecast_id)
+                if existing_digest is not None:
+                    if existing_digest != digest:
+                        self.forecasts_l.corrupted += 1
+                        self._quarantine_exposure(forecast.forecast_id)
+                    continue
+                if (
+                    version == _SCHEMA_V2
+                    and forecast.exposure is Exposure.BLIND
+                    and forecast.structural_exposure is not Exposure.BLIND
+                ):
+                    self.forecasts_l.corrupted += 1
+                    self._exposure_quarantined.add(forecast.forecast_id)
+                self._register(forecast, version=version, digest=digest)
+            elif version == _SCHEMA_V2 and record_kind == _AMENDMENT_KIND:
+                target_hint = payload.get("forecast_id")
+                try:
+                    decoded = exposure_amendment_from_dict(payload)
+                except (KeyError, TypeError, ValueError):
+                    self.forecasts_l.corrupted += 1
+                    pending.append((None, target_hint))
+                    continue
+                pending.append((decoded, decoded.forecast_id))
+            else:
+                self.forecasts_l.corrupted += 1
+                pending.append((None, payload.get("forecast_id")))
+
+        for discovered, target_hint in pending:
+            if discovered is None:
+                if isinstance(target_hint, str):
+                    self._quarantine_exposure(target_hint)
+                continue
+            self._apply_amendment(discovered, rebuilding=True)
+
+    def _quarantine_exposure(self, forecast_id: str) -> None:
+        self._exposure_quarantined.add(forecast_id)
+        if forecast_id in self._effective_exposure:
+            self._effective_exposure[forecast_id] = Exposure.EXPOSED
+        existing = self.outcomes.get(forecast_id)
+        if existing is not None:
+            self.outcomes[forecast_id] = self._fold_outcome_exposure(existing)
 
     # -- capture (host path) --------------------------------------------------
 
@@ -212,7 +476,9 @@ class Substrate:
                 return True
             elif isinstance(event, CompletenessSeal):
                 self.evidence_l.append_dict(_tag(event, "seal"))
-                self._seals[(event.source_ref, event.epoch_ref)] = event
+                seal_key = (event.source_ref, event.epoch_ref)
+                self._seals[seal_key] = event
+                self._seal_versions[seal_key] = _SCHEMA_V2
                 return True
             self.dropped += 1
             return False
@@ -288,7 +554,9 @@ class Substrate:
             reason="first valid terminal observation",
             # An EXPOSED forecast was visible to something that could move
             # its target. It may be interesting. It is not calibration data.
-            calibration_eligible=(f.exposure is Exposure.BLIND),
+            calibration_eligible=(
+                self._effective_exposure.get(f.forecast_id) is Exposure.BLIND
+            ),
         )
         return self._emit(outcome)
 
@@ -320,7 +588,9 @@ class Substrate:
                     observed=None,
                     brier=brier(f.probability, 0.0),
                     reason="horizon passed; stream sealed complete; no matching observation",
-                    calibration_eligible=(f.exposure is Exposure.BLIND),
+                    calibration_eligible=(
+                        self._effective_exposure.get(f.forecast_id) is Exposure.BLIND
+                    ),
                 )))
             else:
                 # We do not know whether it did not happen or whether the
@@ -359,7 +629,7 @@ class Substrate:
         for (source_ref, epoch_ref), seal in self._seals.items():
             if not seal.complete:
                 continue
-            if epoch_ref != f.subject_ref:
+            if seal.subject_ref != f.subject_ref:
                 continue
             if source_ref not in allowed:
                 continue                        # not this observable's channel
@@ -373,9 +643,21 @@ class Substrate:
         return False
 
     def _emit(self, outcome: Outcome) -> Outcome:
-        self.outcomes_l.append_dict(_tag_record(outcome))
-        self.outcomes[outcome.forecast_id] = outcome
-        return outcome
+        payload = _tag_v2(outcome, _OUTCOME_KIND)
+        detached = outcome_from_dict(_without_envelope(payload))
+        self.outcomes_l.append_dict(payload)
+        effective = self._fold_outcome_exposure(detached)
+        self.outcomes[effective.forecast_id] = effective
+        return effective
+
+    def _fold_outcome_exposure(self, outcome: Outcome) -> Outcome:
+        """Eligibility can only stay unchanged or become false."""
+        eligible = bool(outcome.calibration_eligible) and (
+            self._effective_exposure.get(outcome.forecast_id) is Exposure.BLIND
+        )
+        if outcome.calibration_eligible is eligible:
+            return outcome
+        return replace(outcome, calibration_eligible=eligible)
 
     # -- health -------------------------------------------------------------
 
@@ -441,17 +723,31 @@ def _tag(record, kind: str) -> dict:
     """Evidence ledger holds two record types; tag them on the way in."""
     payload = json.loads(to_json(record))
     payload["_kind"] = kind
-    payload["_v"] = LEDGER_SCHEMA
+    payload["_v"] = _SCHEMA_V2 if kind == "seal" else LEDGER_SCHEMA
     return payload
 
 
-def _tag_record(record) -> dict:
-    """Schema-tag a record on a single-type ledger (forecasts, outcomes).
-    These need the version too: an untagged record would be read as v1, so
-    a future writer could never be distinguished from a v1 record."""
+def _tag_v2(record, kind: str) -> dict:
+    """Envelope a schema-v2 record with an explicit semantic kind."""
     payload = json.loads(to_json(record))
-    payload["_v"] = LEDGER_SCHEMA
+    payload["_kind"] = kind
+    payload["_v"] = _SCHEMA_V2
     return payload
+
+
+def _without_envelope(record: dict) -> dict:
+    return {key: value for key, value in record.items() if key not in {"_kind", "_v"}}
+
+
+def _canonical_record_digest(record: dict) -> str:
+    canonical = json.dumps(
+        record,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
 
 
 def _rate(num: int, den: int) -> float | None:
