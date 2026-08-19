@@ -6,9 +6,10 @@
 
 ## Mission
 
-Harden the Hanish substrate, refactor it to PAST > PRESENT > FUTURE, and prove
-the frontier: the harness runs ON the substrate. A substrate that time itself
-can't audit is not a substrate.
+Harden the Hanish substrate into a trustworthy Host 0 instrument. Preserve the
+PAST > FUTURE > PRESENT lattice, correct historical provenance, and require a
+verified promoted receipt before claiming an authoritative run. The temporal
+ablation is deliberately not part of this program.
 
 ## The world
 
@@ -19,14 +20,17 @@ can't audit is not a substrate.
   - **OUTWARD** — the substrate may never raise into its host.
   - **INWARD** — incomplete evidence may never become knowledge (UNRESOLVABLE ≠ MISS).
 - The refactor target and the metric gates are in `HARNESS.md`. Read it first.
-- The journals are `harness/root/*.jsonl`. The director's workflow is
-  `harness/orchestrator.md`. Current team roster is `harness/roster.md`.
+- The historical `harness/root/*.jsonl` runtime was gitignored and is
+  unavailable. Never infer or recreate its bytes. `harness/orchestrator.md`
+  and `harness/roster.md` describe the operating blueprint; promoted receipts
+  and the exclusion registry are the committed research artifacts.
 
 ## How to run
 
 1. Open a session in this repo. Prompt: `director: read program.md and start the loop.`
-2. The director boots the substrate, reads the journal, picks the next open work
-   item from the phase order in HARNESS.md, authors a forecast, spawns a wave.
+2. The director starts a fresh runtime root, reads only retained evidence, picks
+   the next open work item from the phase order in HARNESS.md, authors an
+   honestly exposed forecast, and spawns a wave. Missing history stays missing.
 3. The verifier runs the gates. The guardian attacks. KEEP only on green.
 4. When the journal has no open items: the director writes `harness/digest.md`
    (state FINAL) per the digest spec and stands down. A CHECKPOINT is written at
@@ -35,15 +39,13 @@ can't audit is not a substrate.
 
 ## The plan (current)
 
-- **Flight PAST** — split the package into past/present/future (frontier-architect),
-  land tail-recovery + locking + schema (ledger-doctor, crash-scribe, replay-smith,
-  schema-keeper).
-- **Flight PRESENT** — never-raise `process()`, type enforcement, high-water marks,
-  honest health (host-shield, index-smith, health-watch, clock-court).
-- **Flight FUTURE** — contracts, scoring, adjudication (claim-mint, scoring-scan,
-  adjudicator).
-- **Flight HOST-2** — namespaces + harness adapter (namespace-planner, harness-self).
-- **Flight SHIP** — docs, release, hygiene (docs-writer, release-ship).
+- **Trust guard** — pin replay under distinct hash seeds before core migration.
+- **Core trust** — structural exposure, monotone amendments, bounded capture,
+  incremental resolution, terminal concurrency, and honest world references.
+- **Host 0** — independent plan authority, stable run/leg identities,
+  commit-level aggregation, completeness, CI capture/finalize, and G9 build.
+- **Receipts + Host Ω** — verify and promote authoritative receipts add-only,
+  then attack the same adapter contract with the hostile local host.
 
 ## The law the team answers to (exact)
 
@@ -59,8 +61,12 @@ adjudicator is here to catch.
 
 ## Contract to the human
 
-- Never edit a ledger by hand. Never commit a ledger artifact.
+- Never edit a runtime ledger by hand or commit a mutable runtime root. A
+  sealed, hashed receipt export may be promoted once under
+  `experiments/receipts/`; it is thereafter immutable. The append-only
+  `experiments/calibration-exclusions.jsonl` policy registry may grow only by
+  complete, schema-valid records.
 - A worker may only touch the file it owns (roster says which).
 - The director is the only agent that authors forecasts.
-- You keep the secret: the whole system is a forecast. The first one the
-  harness authors about its own work is the threshold of the frontier.
+- Never label a self-visible operational forecast as calibration. The first
+  Host 0 receipt proves capture and completeness, not predictive skill.

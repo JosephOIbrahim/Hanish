@@ -5,27 +5,308 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
+  research-integrity:
+    name: Research integrity
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout complete history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Enforce append-only research history
+        env:
+          HANISH_EVENT_NAME: ${{ github.event_name }}
+          HANISH_HEAD_SHA: ${{ github.sha }}
+          HANISH_PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HANISH_PUSH_BEFORE_SHA: ${{ github.event.before }}
+          HANISH_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          python -m hanish.adapters.ci_cli check-research-integrity \
+            --event-name "$HANISH_EVENT_NAME" \
+            --pull-request-base-sha "$HANISH_PULL_REQUEST_BASE_SHA" \
+            --push-before-sha "$HANISH_PUSH_BEFORE_SHA" \
+            --default-branch "$HANISH_DEFAULT_BRANCH" \
+            --head "$HANISH_HEAD_SHA"
+
+  forecast:
+    name: Host 0 forecast
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        id: checkout
+        continue-on-error: true
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        id: setup
+        if: always()
+        continue-on-error: true
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Author operational forecast
+        id: author
+        if: always()
+        continue-on-error: true
+        run: |
+          python -m hanish.adapters.ci_cli author-forecast \
+            --repository "${{ github.repository }}" \
+            --workflow-ref "${{ github.workflow_ref }}" \
+            --run-id "${{ github.run_id }}" \
+            --run-attempt "${{ github.run_attempt }}" \
+            --tested-sha "${{ github.sha }}" \
+            --plan .github/host0-plan.json \
+            --workflow .github/workflows/ci.yml \
+            --project pyproject.toml \
+            --output .host0/forecast-artifact
+      - name: Upload forecast
+        id: upload
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: host0-forecast-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          overwrite: false
+          include-hidden-files: true
+          path: |
+            .host0/forecast-artifact/authoring.json
+            .host0/forecast-artifact/identity.json
+            .host0/forecast-artifact/observable-specs.json
+            .host0/forecast-artifact/plan.json
+            .host0/forecast-artifact/state/*.jsonl
+            .host0/forecast-artifact/world-commitment.json
+
   test:
     name: Python ${{ matrix.python-version }}
+    needs: forecast
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        include:
+          - leg-id: python-3.11
+            python-version: "3.11"
+            slot: 1
+          - leg-id: python-3.12
+            python-version: "3.12"
+            slot: 2
+          - leg-id: python-3.13
+            python-version: "3.13"
+            slot: 3
+          - leg-id: python-3.14
+            python-version: "3.14"
+            slot: 4
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        id: setup
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install
+        id: install
         run: |
-          pip install --upgrade pip
-          pip install -e ".[dev]"
-      - name: Lint
-        run: ruff check .
-      - name: Test
-        run: pytest
-      - name: Demo smoke test
-        run: python demo.py
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+      - name: Lint, test, and demo
+        id: gate
+        continue-on-error: true
+        run: |
+          status=0
+          python -m ruff check . || status=1
+          python -m pytest || status=1
+          python demo.py || status=1
+          exit "$status"
+      - name: Write Host 0 leg report
+        id: report
+        if: always()
+        continue-on-error: true
+        run: |
+          python -m hanish.adapters.ci_cli write-leg-report \
+            --repository "${{ github.repository }}" \
+            --workflow-ref "${{ github.workflow_ref }}" \
+            --run-id "${{ github.run_id }}" \
+            --run-attempt "${{ github.run_attempt }}" \
+            --tested-sha "${{ github.sha }}" \
+            --plan .github/host0-plan.json \
+            --leg-id "${{ matrix.leg-id }}" \
+            --checkout-outcome "${{ steps.checkout.outcome }}" \
+            --setup-outcome "${{ steps.setup.outcome }}" \
+            --install-outcome "${{ steps.install.outcome }}" \
+            --gate-outcome "${{ steps.gate.outcome }}" \
+            --python-version "${{ matrix.python-version }}" \
+            --runner-os "${{ runner.os }}" \
+            --runner-image "${ImageOS:-}" \
+            --runner-image-version "${ImageVersion:-}" \
+            --output .host0/leg-report.json
+      - name: Upload Host 0 leg report
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: host0-leg-${{ matrix.leg-id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .host0/leg-report.json
+          if-no-files-found: error
+          overwrite: false
+          include-hidden-files: true
+      - name: Preserve product conclusion
+        if: ${{ always() && steps.gate.outcome == 'failure' }}
+        run: exit 1
+
+  package:
+    name: Package build (G9)
+    needs: forecast
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        id: setup
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+          cache: pip
+      - name: Install build frontend
+        id: install
+        run: python -m pip install --upgrade pip build
+      - name: Build sdist and wheel
+        id: gate
+        continue-on-error: true
+        run: python -m build
+      - name: Write Host 0 leg report
+        id: report
+        if: always()
+        continue-on-error: true
+        run: |
+          python -m hanish.adapters.ci_cli write-leg-report \
+            --repository "${{ github.repository }}" \
+            --workflow-ref "${{ github.workflow_ref }}" \
+            --run-id "${{ github.run_id }}" \
+            --run-attempt "${{ github.run_attempt }}" \
+            --tested-sha "${{ github.sha }}" \
+            --plan .github/host0-plan.json \
+            --leg-id package-build \
+            --checkout-outcome "${{ steps.checkout.outcome }}" \
+            --setup-outcome "${{ steps.setup.outcome }}" \
+            --install-outcome "${{ steps.install.outcome }}" \
+            --gate-outcome "${{ steps.gate.outcome }}" \
+            --python-version "3.14" \
+            --runner-os "${{ runner.os }}" \
+            --runner-image "${ImageOS:-}" \
+            --runner-image-version "${ImageVersion:-}" \
+            --output .host0/leg-report.json
+      - name: Upload Host 0 leg report
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: host0-leg-package-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .host0/leg-report.json
+          if-no-files-found: error
+          overwrite: false
+          include-hidden-files: true
+      - name: Preserve product conclusion
+        if: ${{ always() && steps.gate.outcome == 'failure' }}
+        run: exit 1
+
+  host0:
+    name: Host 0 aggregate
+    needs: [forecast, test, package]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        id: checkout
+        if: always()
+        continue-on-error: true
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        id: setup
+        if: always()
+        continue-on-error: true
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Download forecast
+        id: download-forecast
+        if: always()
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: host0-forecast-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .host0/forecast
+          digest-mismatch: error
+      - name: Download leg reports
+        id: download-reports
+        if: always()
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: host0-leg-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .host0/reports
+          merge-multiple: false
+          digest-mismatch: error
+      - name: Aggregate and finalize
+        id: aggregate
+        if: always()
+        continue-on-error: true
+        run: |
+          python -m hanish.adapters.ci_cli aggregate \
+            --forecast-dir .host0/forecast \
+            --reports-dir .host0/reports \
+            --plan .github/host0-plan.json \
+            --output .host0/run
+      - name: Export candidate receipt
+        id: export
+        if: ${{ always() && steps.aggregate.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          python -m hanish.adapters.ci_cli export-receipt \
+            --run-dir .host0/run \
+            --output-parent .host0/receipts
+      - name: Upload candidate receipt
+        id: upload
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: host0-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .host0/receipts/*
+          if-no-files-found: error
+          overwrite: false
+          include-hidden-files: true
+      - name: Host 0 summary
+        if: always()
+        continue-on-error: true
+        run: |
+          if [[ "${{ steps.aggregate.outcome }}" == "success" && \
+                "${{ steps.export.outcome }}" == "success" && \
+                "${{ steps.upload.outcome }}" == "success" ]]; then
+            echo "Host 0 produced a verified candidate receipt." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::Host 0 instrumentation was incomplete; product conclusions are unchanged."
+            echo "Host 0 was incomplete. No receipt may be promoted." >> "$GITHUB_STEP_SUMMARY"
+          fi

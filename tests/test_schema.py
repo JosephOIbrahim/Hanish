@@ -22,6 +22,7 @@ from hanish.future.claims import (
     ResolutionSpec,
 )
 from hanish.past.ledger import LEDGER_SCHEMA
+from tests._support import created_before
 
 SHA = "abc123"
 LATER = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
@@ -34,7 +35,8 @@ def build(tmp_path):
         subject_ref=ci.subject_ref(SHA),
         claim="schema stays honest",
         probability=0.5,
-        exposure=Exposure.BLIND,
+        exposure=Exposure.EXPOSED,
+        created_at=created_before(LATER),
         world_ref=ci.world_ref(SHA, "wf1", "lock1"),
         world_ref_capability=ci.world_ref_capability,
         resolution=ResolutionSpec(
@@ -55,6 +57,8 @@ def test_records_carry_the_schema_version(tmp_path):
     first = sub.evidence_l.path.read_text().splitlines()[0]
     payload = json.loads(first)
     assert payload["_v"] == LEDGER_SCHEMA == 1
+    forecast_payload = json.loads(sub.forecasts_l.path.read_text().splitlines()[0])
+    assert (forecast_payload["_v"], forecast_payload["_kind"]) == (2, "forecast")
 
 
 def test_legacy_untagged_records_open_fine(tmp_path):

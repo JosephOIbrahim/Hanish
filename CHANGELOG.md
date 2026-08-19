@@ -3,6 +3,43 @@
 All notable changes to Hanish. Append-only, like the ledgers: a correction is
 a new entry, never an edit to an old one.
 
+## 0.2.0 — the instrument becomes a host
+
+Hanish closes the trust gaps found by the v7 adjudication without beginning
+the Moneta + Octavius + Hanish temporal ablation. GitHub Actions is now a real
+Host 0: it authors an operational forecast before evidence, records five
+independently identified test/build legs, aggregates them at commit level,
+seals completeness, and exports a replay-verified candidate receipt. The
+forecast is deliberately `EXPOSED` and never calibration data.
+
+**Provenance and exposure.** The documentation retracts the historical claim
+of autonomous CI capture, and the unavailable `flight-past` runtime is not
+reconstructed. A canonical, append-only exclusion record removes
+`f_c57a1c3bc61f` from the published calibration corpus. Schema-v2 forecasts
+derive `BLIND` only from complete, disjoint identities plus a named separation
+control and host attestation; uncertainty defaults to `EXPOSED`. Digest-bound
+amendments can only move `BLIND -> EXPOSED`, and replay folds that change
+monotonically.
+
+**Determinism and bounded work.** Fixed mixed-version ledgers replay to one
+pinned semantic digest under distinct hash seeds. Evidence capture performs
+one cold scan and then synchronizes only the appended byte tail. Resolution
+uses key-local cursors and a deterministic dirty queue, preserving late
+registration of pre-authored forecasts without rescanning settled history.
+Concurrent outcome writes use the same monotone transition rules as replay.
+
+**Receipts and hostility.** Promoted experiment receipts bind every payload to
+a non-circular SHA-256 manifest and are semantically replayed from a temporary
+copy. CI rejects any edit, move, or deletion beneath `experiments/receipts/`
+and permits the calibration-exclusion ledger to change only by complete valid
+appends. Host Ω and `CIAdapter` run through the same adversarial conformance
+contract. G9 now includes a real source-and-wheel package build.
+
+Legacy schema-v1 records remain readable. Legacy and first-run worlds that
+cannot be reconstructed are honestly `IDENTIFIABLE`, not `REPLAYABLE`. The
+runtime core remains domain-blind, standard-library-only, append-only,
+fail-open outward, and fail-closed inward.
+
 ## 0.1.2 — the waves
 
 Two harness wave records land. No package change: `hanish/` is untouched and

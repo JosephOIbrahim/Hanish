@@ -1,0 +1,1 @@
+{"_kind":"host0_reproduction","_v":1,"command":"python -m hanish.adapters.ci_cli verify-receipt --receipt .","tested_sha":"f9ca2697627eecd01f910e23e56d54bb05c86379"}

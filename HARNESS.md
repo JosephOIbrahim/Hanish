@@ -1,10 +1,10 @@
 # HARNESS — the team that hardens Hanish
 
-> Position statement: the harness is Hanish's **second host**. CI proved the loop
-> on a real external stream. This harness runs the loop on the team itself — the
-> ledger is the memory, the director authors forecasts, the gates resolve them.
-> A substrate that cannot instrument its own hardening does not deserve to be called
-> a substrate.
+> Provenance correction: this file began as the blueprint for a second host.
+> The original session was operator-driven, and its synthetic `flight-past`
+> evidence was not an autonomous CI capture. Its unavailable runtime root is
+> not reconstructed. V0.2 makes GitHub Actions Host 0 and uses Host Ω as the
+> hostile local conformance host; neither creates calibration data by default.
 
 ## 1. The honest read on autoresearch
 
@@ -27,12 +27,12 @@ What transfers is the **spine**, not the machinery:
 
 The 20-agent team, the orchestration, and the agents talking to each other are
 **additions** — autoresearch deliberately has none of them. That is the gap this
-harness fills, and it fills it the way Hanish would: every opinion becomes an
-observation, every decision a forecast, every verdict real.
+harness aimed to fill. The workflow below is a blueprint; only records retained
+in an available ledger or promoted receipt are evidence that a run occurred.
 
-## 2. The scout (evidence, not vibes)
+## 2. The historical scout (evidence, not vibes)
 
-Probed against the live code on 2026-08-19:
+Probed against the pre-v0.1.1 code on 2026-08-19:
 
 - **P1 — `process()` breaks the OUTWARD law.** `capture()` is wrapped; `process()`
   is not. A host emitting a `"garbage"` string on a bool observable with a `GT`
@@ -54,35 +54,35 @@ Probed against the live code on 2026-08-19:
 - **P8 — no host namespace.** Observable names are global; a second host collides
   with CI's flat `observables` dict.
 
-Strengths (unchanged by this work): append-only fsync ledgers; index-not-scan for
-forecast lookup; first-valid-terminal; fail-closed expiry; domain blindness
-enforced by AST + vocabulary; zero runtime deps; deterministic replay.
+P1–P5 and P7 were closed in v0.1.1. P6 and the namespace/Host 0 work were
+carried into the v0.2 design rather than being misreported as finished.
 
-## 3. The refactor — PAST > PRESENT > FUTURE
+Strengths retained by the work: append-only fsync ledgers; first-valid-terminal;
+fail-closed expiry; domain blindness enforced by AST + vocabulary; and zero
+runtime dependencies. Seed-variance replay is now a separate gate, not an
+assertion inferred from an ordinary green test run.
+
+## 3. The refactor — PAST > FUTURE > PRESENT
 
 The codebase teaches its own grammar by structure. The dependency lattice is the
 arrow — PAST is the only root:
 
 ```
 hanish/
-  shared.py          the time vocabulary: now(), parse(), Validity, Emission,
-                     Comparator. Imports nothing.              [root]
+  time.py            the time vocabulary: now(), parse          [root]
   past/              what happened — append-only, replayable
-    ledger.py        + tail recovery (P3), locking (P4), schema tags (P5)
+    ledger.py        tail recovery, locking, schema tags
     events.py        ObservationEvent, CompletenessSeal, Outcome
-    version.py       schema versioning + migration policy
-  future/            what is claimed — authored blind, scored later
+  future/            what is claimed and scored later
     claims.py        Forecast, ResolutionSpec, Exposure, WorldRef, Adjudication
     scoring.py       compare, Brier, calibration honesty
   present/           the now — indexed state, health, sweep
     substrate.py     index, resolve, sweep, status
-    health.py        telemetry, digest, advisories
   adapters/
-    ci.py            host #1
-    harness.py       host #2 — built by this harness's own first delivery
+    ci.py            CI translation seam; Host 0 integration lands in v0.2
 ```
 
-Import lattice (enforced, see law 5): `past` imports nothing above `shared`;
+Import lattice (enforced, see law 4): `past` imports nothing above `time`;
 `future` imports `past`; `present` imports `past` + `future`. No adapter
 imports into `past`/`future`/`present`. The domain-blindness test walks all
 three dirs and the vocabulary grep still bites.
@@ -99,9 +99,10 @@ director is the operator; the workers are the bench.
   item, authors a forecast before it, spawns the owning worker(s), scores.
 - **Capability registry:** `.claude/agents/*.md` — 19 roles + director, each
   with a tool whitelist and a denied list.
-- **State:** the journal (append-only, in the ledger of the harness) + the
-  substrate root under `harness/root/`. The journal IS memory; there is no
-  other.
+- **State:** the original `harness/root/` was a gitignored runtime directory
+  and is unavailable. Committed waves and this digest are interpretations, not
+  replacement ledger bytes. New authoritative runs require promoted, hashed
+  receipts under `experiments/receipts/`.
 - **Context:** `program.md` + `orchestrator.md` + the journal tail are loaded
   at boot; the director assembles per-item context for each worker.
 - **Permission:** all mutating writes go through the director's keep verdict;
@@ -134,20 +135,21 @@ file it owns, each a law it guards:
 | `critic`        | law review of every diff | the constitution |
 | `docs-writer`    | ADRs, README, operator card | teach-down |
 | `release-ship`   | CI, PyPI, versioning | P7 hygiene |
-| `harness-self`   | adapters/harness.py (host #2) | the recursion |
+| `harness-self`   | Host Ω fixture + adapter contract | hostile conformance |
 
 Waves, not all-at-once: the director activates 2–5 per work item. The roster is
 the ceiling, not the concurrency.
 
 ## 5. The communication — agents that talk
 
-- The **journal** (append-only JSONL under `harness/root/` via the substrate):
-  every observation a worker posts, every forecast the director authors, every
-  verdict the gates emit.
+- A fresh run may use an append-only runtime journal under `harness/root/`, but
+  that ignored directory is operational state, not published evidence. Every
+  authoritative run must be exported, verified, and promoted as a receipt.
 - **Direct handoff** for dependent work (SendMessage): the director to a worker,
   the guardian attacking a live diff, a worker asking the verifier for a gate.
-- **Single source of truth is the journal.** No worker may trust what it says in
-  a channel; it must read the journal and the substrate it was given.
+- **Single source of truth during a live run is that run's journal.** Across
+  clones or releases, only committed waves, policy records, and verified
+  receipts survive. No worker may fill a missing journal from prose.
 
 ## 6. The metrics (the only budget that keeps a change)
 
@@ -157,11 +159,11 @@ the ceiling, not the concurrency.
 | G2  tail-toler | torn-tail suite | substrate reopens, status admits a lost tail (P3) |
 | G3  once-only | cross-process race | one event = one record (P4) |
 | G4  schema | forward-open | old ledgers open, records versioned (P5) |
-| G5  lattice | domain test | past←present←future + vocab grep (the refactor) |
+| G5  lattice | domain test | past←future←present + vocab grep (the refactor) |
 | G6  scoreable | honesty suite | rates still separate closure/scoreable/capture |
-| G7  replay | the 20 V0.0 tests | all green, only import paths changed |
-| G8  host #2 | self-forecast | adapters/harness.py authors, resolves, calibrates |
-| G9  ship | release check | ruff, pytest 4×python, demo, package builds |
+| G7  replay | seed-variance replay gate | distinct hash seeds match the pinned semantic digest |
+| G8  Host Ω | hostile adapter contract | local hostile host and CI adapter pass the same conformance suite |
+| G9  ship | release check | ruff, supported Python tests, demo, package build, receipt verification |
 
 The `verifier` runs these; the `guardian` attacks the claim; KEEP is entered by
 the `verifier` alone, DISCARD needs a reason in the journal, UNRESOLVABLE is
@@ -169,13 +171,16 @@ honest: "budget exhausted, gate not met".
 
 ## 7. The frontier
 
-Hanish is the epistemic spine for agent systems:
+Hanish is intended to become the epistemic spine for agent systems. These are
+frontier goals, not claims about retained evidence:
 
-1. **Self-measurement** — the harness IS host #2; its own claims get scored by
-   its own evidence; the team's calibration is a real number.
-2. **Forensics by replay** — REPLAYABLE world_refs make "who knew what when"
-   checkable; the substrate stops being a scoreboard and becomes the epistemic
-   layer under any agent team — a cognitive audit trail.
+1. **Self-measurement** — future hosts may score their own claims only when
+   exposure and separation are structurally proved. The historical self-score
+   is excluded; the published calibration corpus currently has zero eligible
+   samples.
+2. **Forensics by replay** — a full world commitment can make "who knew what
+   when" checkable. Legacy truncated CI references are only `IDENTIFIABLE`, not
+   `REPLAYABLE`.
 3. **Namespaced multi-host** — CI, harness, build, render, arbitrary agents all
    emit into one fabric with sealed epochs and per-host world_refs.
 4. **Calibration analytics** — Brier drift, per-actor trust scores, honesty
@@ -183,20 +188,18 @@ Hanish is the epistemic spine for agent systems:
    "calibration data" already drawn by EXPOSED).
 
 The frontier is not a new system. It is the same loop, hosted by more
-worlds, with the harness itself as the second world.
+worlds. The historical harness session is not promoted as the second world.
 
 ## 8. Phases
 
-1. **Flight PAST** — frontier-architect executes the split under guardian attack;
-   ledger-doctor/schema-lock/crash-scribe/replay-smith land G1–G5.
-2. **Flight PRESENT** — host-shield, index-smith, health-watch, clock-court land
-   G1/G6 + perf.
-3. **Flight FUTURE** — claim-mint, scoring-scan, adjudicator land the scoring
-   universe + G6.
-4. **Cross-cutting** — critic clears every diff; docs-writer writes the
-   teach-down; release-ship lands G9 and P7 hygiene.
-5. **Frontier (host #2)** — namespace-planner + harness-self land G8: the
-   journal becomes a real substrate; the director authors its first forecast.
+1. **Trust guard** — seed-variance replay is pinned before schema migration.
+2. **Core trust** — structural exposure, monotone amendment, bounded capture,
+   incremental resolution, terminal concurrency, and honest world references.
+3. **Host 0** — independent matrix plan, stable identities, commit aggregation,
+   completeness, G9 package build, and a candidate receipt.
+4. **Promotion and hostility** — verify and promote the receipt add-only, then
+   run the same contract against Host Ω.
 
-**Definition of done:** G1–G9 green, digest written, the harness's own first
-forecast resolved by its own evidence, and the teach-down delivered at sea level.
+**Definition of done:** G1–G9 are green, one live Actions candidate verifies
+and is promoted without rewriting history, and no exposed forecast is reported
+as calibration. Moneta + Octavius + Hanish ablation remains out of scope.

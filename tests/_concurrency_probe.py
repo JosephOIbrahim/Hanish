@@ -8,6 +8,7 @@ root, then prints whether the substrate accepted it.
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 
 from hanish import Substrate
 from hanish.adapters.ci import CIAdapter
@@ -15,7 +16,10 @@ from hanish.adapters.ci import CIAdapter
 
 def main(root: str) -> None:
     ci = CIAdapter()
-    event = ci.checks_result("abc123", run_id="7", attempt=1, passed=True)
+    event = replace(
+        ci.checks_result("abc123", run_id="7", attempt=1, passed=True),
+        arrived_at="2026-01-01T00:00:00+00:00",
+    )
     sub = Substrate(root, observables=ci.observable_specs())
     ok = sub.capture(event)
     print("accepted" if ok else "rejected", flush=True)

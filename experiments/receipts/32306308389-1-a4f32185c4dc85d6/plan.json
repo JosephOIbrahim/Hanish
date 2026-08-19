@@ -1,0 +1,65 @@
+{
+  "_kind": "host0_plan",
+  "_v": 1,
+  "aggregate": {
+    "id": "aggregate-required-checks",
+    "slot": 6
+  },
+  "legs": [
+    {
+      "commands": [
+        "python -m ruff check .",
+        "python -m pytest",
+        "python demo.py"
+      ],
+      "id": "python-3.11",
+      "kind": "test",
+      "python": "3.11",
+      "slot": 1
+    },
+    {
+      "commands": [
+        "python -m ruff check .",
+        "python -m pytest",
+        "python demo.py"
+      ],
+      "id": "python-3.12",
+      "kind": "test",
+      "python": "3.12",
+      "slot": 2
+    },
+    {
+      "commands": [
+        "python -m ruff check .",
+        "python -m pytest",
+        "python demo.py"
+      ],
+      "id": "python-3.13",
+      "kind": "test",
+      "python": "3.13",
+      "slot": 3
+    },
+    {
+      "commands": [
+        "python -m ruff check .",
+        "python -m pytest",
+        "python demo.py"
+      ],
+      "id": "python-3.14",
+      "kind": "test",
+      "python": "3.14",
+      "slot": 4
+    },
+    {
+      "commands": [
+        "python -m build"
+      ],
+      "id": "package-build",
+      "kind": "build",
+      "python": "3.14",
+      "slot": 5
+    }
+  ],
+  "plan_id": "github-actions-host0-v1",
+  "workflow_path": ".github/workflows/ci.yml"
+}

@@ -101,20 +101,22 @@ closed in 0.1.1 with a regression test each (`tests/test_guardian.py`). The
 stress test that proved M-1 then found a fifth concurrency law-break: the
 lock protocol's byte-0 probe collided with Windows' mandatory byte-range
 lock (concurrent contender raised instead of waiting). All closed; the gates
-that were green-and-wrong are now red-and-right. Gates G1–G9 green by
-`pytest tests/ -q` (41), ruff, demo. G8 (host #2 adapter) not built. G9
-green: `hanish-0.1.1` builds, released on GitHub (`v0.1.1`). Open flights: 2.
+that were green-and-wrong are now red-and-right. At this checkpoint G1–G7
+were green by `pytest tests/ -q` (41), ruff, and demo; G8 was not built. G9
+was green locally: `hanish-0.1.1` built and was released on GitHub (`v0.1.1`).
+The 41 is a historical v0.1.2 baseline, not a mutable claim about today's
+suite. Open flights at that checkpoint: 2.
 Regressions: 0.
 
 **3. What landed.**
 
 | flight | item | gate | file | commit |
 |---|---|---|---|---|
-| PAST | lattice split (past←future←present) | G5/G7 | `hanish/past/` `future/` `present/` `time.py` | *this flight, unpushed* |
-| PAST | torn-tail + corruption accounting | G2 | `hanish/past/ledger.py` — `repair()` vs `raw()` | *unpushed* |
-| PAST | cross-process once-only | G3 | `append_observation_once` under the lock | *unpushed* |
-| PAST | schema versioning | G4 | `_v` tag, future-version fails loud | *unpushed* |
-| PAST | never-raise `process()` | G1 | `present/substrate.py` — OUTWARD/INWARD | *unpushed* |
+| PAST | lattice split (past←future←present) | G5/G7 | `hanish/past/` `future/` `present/` `time.py` | `v0.1.1` |
+| PAST | torn-tail + corruption accounting | G2 | `hanish/past/ledger.py` — `repair()` vs `raw()` | `v0.1.1` |
+| PAST | cross-process once-only | G3 | `append_observation_once` under the lock | `v0.1.1` |
+| PAST | schema versioning | G4 | `_v` tag, future-version fails loud | `v0.1.1` |
+| PAST | never-raise `process()` | G1 | `present/substrate.py` — OUTWARD/INWARD | `v0.1.1` |
 | GUARDIAN | P0-1 damaged record never bricks rebuild | G2 | `substrate.py _rebuild` — guarded decoders | *this flight* |
 | GUARDIAN | P0-2 poison obs can't deny resolution | G1 | `_resolve_from_evidence` per-obs guard | *this flight* |
 | GUARDIAN | P0-3 seals scoped to observable's source | G5 | `ObservableSpec.sources` + `_stream_complete` | *this flight* |
@@ -127,31 +129,36 @@ keyed off the last split element (which a trailing newline makes empty) and
 damage counters double-counted across the `_count` and rebuild passes. That is
 fixed, not discarded.
 
-**5. The numbers.** 41 tests pass — the 31 of v0.1.0 plus the guardian's 10,
-each a regression that would have caught the release. ruff clean; demo runs;
-package builds (`hanish-0.1.1`). The substrate's own root (gitignored) holds
-one authored forecast, resolved: **HIT**, brier 0.0625 — the team's first
-self-measurement by its own instrument.
+**5. The numbers.** This checkpoint recorded 41 passing tests — the 31 of
+v0.1.0 plus the guardian's 10 — with ruff, demo, and the `hanish-0.1.1`
+package build green. The v0.1.2 baseline remains 41; the current suite must be
+run for a live count. The checkpoint also reported one HIT with Brier 0.0625
+inside a gitignored runtime root. That root is now unavailable, so those raw
+bytes cannot be verified or promoted as a receipt.
 
-**6. The frontier.** `harness/root` (host #2, bootstrapped) carried the first
-self-forecast: `f_c57a1c3bc61f`, BLIND, p=0.75, claim "flight-past-1 lands
-G1–G5 and G7 green", subject `git:e1f10f0`. Every claimed gate is green, the
-CI result was captured, and the substrate resolved it HIT. The loop the
-harness exists to prove is closed: the harness forecast its own landing and
-was scored on it.
+**6. Provenance amendment.** The first self-forecast was reported as
+`f_c57a1c3bc61f`, `BLIND`, p=0.75, claim "flight-past-1 lands G1–G5 and G7
+green", subject `git:e1f10f0`. That interpretation is withdrawn. The author
+directed work capable of moving the target gates, so the forecast was
+`EXPOSED`; the evidence carried a synthetic `run_id="flight-past"`, not an
+autonomous CI capture. Because `harness/root` was gitignored and is
+unavailable, no forecast, evidence, outcome, timestamp, digest, or receipt is
+reconstructed. `experiments/calibration-exclusions.jsonl` excludes the sample
+by repository identity and forecast ID. The published calibration corpus has
+zero eligible samples.
 
 **7. Open threads.**
 
 | thread | why next |
 |---|---|
-| flight PRESENT → FUTURE → HOST-2 | G8 host #2 is the remaining gate |
-| this digest → FINAL | when the journal has no open items |
+| v0.2 core trust | exposure, capture bounds, resolution concurrency, world references |
+| Host 0 + Host Ω | live candidate receipt plus hostile local conformance |
 
 **8. Resume protocol.** Boot per `orchestrator.md`. Verify:
 `python -m pytest tests/ -q && python -m ruff check hanish/ tests/ demo.py && python demo.py`.
-Next thread: G8 — a second host adapter (the only gate not yet proven), then
-the journal resolve. The guardian is done for this diff; it moves to the next
-landing.
+Next thread: finish v0.2 trust gates, run the live Host 0 workflow, verify and
+promote its receipt add-only, then exercise Host Ω. The historical root is not
+a resume source.
 
 **9. Teach-down (human).** The substrate is a scoring notebook that trusts
 nothing and loses nothing. `demo.py` shows it in one read: author a forecast,

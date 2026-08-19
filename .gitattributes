@@ -1,0 +1,6 @@
+# These files are byte-addressed evidence. Newline conversion would change
+# manifest hashes, append-prefix policy, or replay digests.
+experiments/calibration-exclusions.jsonl -text
+experiments/receipts/** -text
+tests/fixtures/replay_v1/** -text
+tests/fixtures/replay_v2/** -text

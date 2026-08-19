@@ -18,6 +18,7 @@ from hanish.future.claims import (
     ResolutionSpec,
 )
 from hanish.past.events import Verdict
+from tests._support import created_before
 
 SHA = "abc123"
 LATER = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
@@ -30,7 +31,8 @@ def build(tmp_path):
         subject_ref=ci.subject_ref(SHA),
         claim="tail recovery keeps the substrate open",
         probability=0.7,
-        exposure=Exposure.BLIND,
+        exposure=Exposure.EXPOSED,
+        created_at=created_before(LATER),
         world_ref=ci.world_ref(SHA, "wf1", "lock1"),
         world_ref_capability=ci.world_ref_capability,
         resolution=ResolutionSpec(

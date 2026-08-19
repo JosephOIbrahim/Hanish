@@ -23,6 +23,7 @@ from hanish.past.events import (
     Terminal,
     Verdict,
 )
+from tests._support import blind_authorship, created_before
 
 SHA = "abc123"
 LATER = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
@@ -32,11 +33,17 @@ PAST = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
 def build(tmp_path, horizon=LATER, probability=0.82, exposure=Exposure.BLIND):
     ci = CIAdapter()
     sub = Substrate(tmp_path, observables=ci.observable_specs())
+    authorship = (
+        blind_authorship(horizon)
+        if exposure is Exposure.BLIND
+        else {"created_at": created_before(horizon)}
+    )
     f = Forecast(
         subject_ref=ci.subject_ref(SHA),
         claim="next valid required-check result passes",
         probability=probability,
         exposure=exposure,
+        **authorship,
         world_ref=ci.world_ref(SHA, "wf1", "lock1"),
         world_ref_capability=ci.world_ref_capability,
         resolution=ResolutionSpec(
@@ -104,7 +111,8 @@ def test_undeclared_observable_cannot_be_authored(tmp_path):
         subject_ref="git:abc",
         claim="vibes",
         probability=0.9,
-        exposure=Exposure.BLIND,
+        exposure=Exposure.EXPOSED,
+        created_at=created_before(LATER),
         resolution=ResolutionSpec(
             observable="ci.nothing_emits_this",
             comparator=Comparator.EQ, threshold=True, horizon=LATER,
@@ -243,7 +251,7 @@ def test_world_ref_capability_is_enforced_at_construction(tmp_path):
     with pytest.raises(ValueError, match="declared world_ref capability"):
         Forecast(
             subject_ref="git:x", claim="c", probability=0.5,
-            exposure=Exposure.BLIND,
+            exposure=Exposure.EXPOSED,
             world_ref=None,
             world_ref_capability=WorldRefCapability.REPLAYABLE,
             resolution=ResolutionSpec(
