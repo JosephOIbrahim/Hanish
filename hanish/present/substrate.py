@@ -74,25 +74,80 @@ class Substrate:
     # -- rebuild ------------------------------------------------------------
 
     def _rebuild(self) -> None:
-        for f in self.forecasts_l.read(forecast_from_dict):
+        """Rebuild all derived state from the three ledgers.
+
+        No single damaged record may brick the rebuild -- not a torn tail,
+        not an interior corruption, and not a record that parses as JSON
+        but is not a valid forecast/observation/seal/outcome. A record this
+        build cannot interpret is corruption: skipped and counted
+        (corrupted), the same way the ledger counts a bad line, and the
+        ledger's own promise stands: 'a damaged byte is not allowed to
+        brick a rebuild.'
+
+        The one intentional exception is schema versioning: a record from a
+        NEWER writer fails loud (G4), because silently misreading a future
+        format is how corruption enters a calibration feed."""
+        for rec in self.forecasts_l.raw():
+            if not self._version_ok(rec, self.forecasts_l):
+                continue
+            try:
+                f = forecast_from_dict(rec)
+            except (KeyError, TypeError, ValueError):
+                self.forecasts_l.corrupted += 1
+                continue
             self._register(f)
+
         for rec in self.evidence_l.raw():
-            kind = rec.pop("_kind")
-            version = rec.pop("_v", 1)
-            if version > LEDGER_SCHEMA:
-                raise ValueError(
-                    f"evidence written by schema v{version}; this reader "
-                    f"understands up to v{LEDGER_SCHEMA}"
-                )
+            kind = rec.pop("_kind", None)
+            if not self._version_ok(rec, self.evidence_l):
+                continue
             if kind == "observation":
-                obs = observation_from_dict(rec)
+                try:
+                    obs = observation_from_dict(rec)
+                except (KeyError, TypeError, ValueError):
+                    self.evidence_l.corrupted += 1
+                    continue
                 self._seen.add(obs.dedup_key)
                 self._observations.append(obs)
             elif kind == "seal":
-                seal = seal_from_dict(rec)
+                try:
+                    seal = seal_from_dict(rec)
+                except (KeyError, TypeError, ValueError):
+                    self.evidence_l.corrupted += 1
+                    continue
                 self._seals[(seal.source_ref, seal.epoch_ref)] = seal
-        for o in self.outcomes_l.read(outcome_from_dict):
+            else:
+                self.evidence_l.corrupted += 1
+                continue
+
+        for rec in self.outcomes_l.raw():
+            if not self._version_ok(rec, self.outcomes_l):
+                continue
+            try:
+                o = outcome_from_dict(rec)
+            except (KeyError, TypeError, ValueError):
+                self.outcomes_l.corrupted += 1
+                continue
             self.outcomes[o.forecast_id] = o
+
+    @staticmethod
+    def _version_ok(rec: dict, ledger: Ledger) -> bool:
+        """Gate the schema version of one record; True means readable.
+
+        A record without a version tag is v1. A non-integer tag is
+        corruption. A tag NEWER than this reader fails loud -- older code
+        must never silently misread newer data. Pops the tag so decoders
+        never see a field they do not know."""
+        version = rec.pop("_v", 1)
+        if isinstance(version, bool) or not isinstance(version, int):
+            ledger.corrupted += 1
+            return False
+        if version > LEDGER_SCHEMA:
+            raise ValueError(
+                f"ledger written by schema v{version}; this reader "
+                f"understands up to v{LEDGER_SCHEMA}"
+            )
+        return True
 
     def _register(self, f: Forecast) -> None:
         self.forecasts[f.forecast_id] = f
@@ -120,7 +175,7 @@ class Substrate:
             )
         if forecast.forecast_id in self.forecasts:
             raise ValueError(f"forecast {forecast.forecast_id} already exists")
-        self.forecasts_l.append(forecast)
+        self.forecasts_l.append_dict(_tag_record(forecast))
         self._register(forecast)
         return forecast.forecast_id
 
@@ -189,13 +244,24 @@ class Substrate:
         for obs in self._observations:
             key = (obs.subject_ref, obs.observable)
             for fid in self.index.get(key, []):        # indexed. never a scan.
-                if fid in self.outcomes:
-                    continue                            # already terminal
                 f = self.forecasts[fid]
-                if not f.resolution.accepts(obs.validity):
-                    continue                            # exogenous != correct
-                if parse(obs.arrived_at) > parse(f.resolution.horizon):
-                    continue                            # arrived after horizon
+                existing = self.outcomes.get(fid)
+                if existing is not None and existing.terminal is not Terminal.UNRESOLVABLE:
+                    continue                            # already terminal
+                try:
+                    if not f.resolution.accepts(obs.validity):
+                        continue                        # exogenous != correct
+                    if parse(obs.arrived_at) > parse(f.resolution.horizon):
+                        continue                        # arrived after horizon
+                except (TypeError, ValueError, KeyError):
+                    # A malformed observation must never abort the pass --
+                    # and, since it persists, must never be allowed to
+                    # abort every later pass either. Fail closed: counted
+                    # once, never a verdict, keep draining.
+                    if (obs.dedup_key, fid) not in self._invalid:
+                        self._invalid.add((obs.dedup_key, fid))
+                        self.invalid_compare += 1
+                    continue
                 assert f.resolution.adjudication is Adjudication.FIRST_VALID_TERMINAL
                 try:
                     produced.append(self._score(f, obs))
@@ -227,8 +293,12 @@ class Substrate:
         return self._emit(outcome)
 
     def _sweep_expired(self, at: str) -> list[Outcome]:
-        """Housekeeping, not the epistemic path. May lag arbitrarily and can
-        never change an outcome already recorded."""
+        """Housekeeping, not the epistemic path. May lag arbitrarily.
+
+        An UNRESOLVABLE closure is a housekeeping closure, not a verdict:
+        valid in-time evidence that arrives later may reopen it (see
+        _resolve_from_evidence). A settled RESOLVED can never be changed."""
+
         produced: list[Outcome] = []
         for fid, f in self.forecasts.items():
             if fid in self.outcomes:
@@ -269,16 +339,30 @@ class Substrate:
         return produced
 
     def _stream_complete(self, f: Forecast) -> bool:
-        """A stream is complete only if some seal covers it AND every
-        source_seq from 1..final_source_seq was actually received.
+        """A stream is complete only if the observable's OWN channel sealed
+        it AND every source_seq from 1..final_source_seq was received.
+
+        A seal names a (source, epoch). A forecast is about an OBSERVABLE,
+        and only a seal from a source that actually emits that observable
+        can certify the channel's end. A seal from an unrelated source --
+        even one that legitimately closed its own stream for this epoch --
+        says nothing about this forecast, and must never turn its absence
+        into a MISS. A host that declares no sources for an observable
+        forfeits absence-as-MISS entirely.
 
         A drop counter alone is insufficient: it only knows about failures
         it observed."""
+        spec = self.observables.get(f.resolution.observable)
+        if spec is None or not spec.sources:
+            return False                        # channel identity unknown: fail closed
+        allowed = spec.sources
         for (source_ref, epoch_ref), seal in self._seals.items():
             if not seal.complete:
                 continue
             if epoch_ref != f.subject_ref:
                 continue
+            if source_ref not in allowed:
+                continue                        # not this observable's channel
             seen = {
                 o.source_seq for o in self._observations
                 if o.source_ref == source_ref and o.epoch_ref == epoch_ref
@@ -289,7 +373,7 @@ class Substrate:
         return False
 
     def _emit(self, outcome: Outcome) -> Outcome:
-        self.outcomes_l.append(outcome)
+        self.outcomes_l.append_dict(_tag_record(outcome))
         self.outcomes[outcome.forecast_id] = outcome
         return outcome
 
@@ -302,8 +386,12 @@ class Substrate:
         lets 'closure 99%, scoreable 71%, drop 0.1%' be told apart from
         'closure 72%, scoreable 71%, drop 27%'. Very different failures."""
         at = at or now()
+        try:
+            parsed_at = parse(at)
+        except ValueError:
+            parsed_at = parse(now())            # a broken clock is still a clock
         due = [f for f in self.forecasts.values()
-               if parse(at) > parse(f.resolution.horizon)]
+               if parsed_at > parse(f.resolution.horizon)]
         terminal = [f for f in due if f.forecast_id in self.outcomes]
         scoreable = [f for f in due
                      if (o := self.outcomes.get(f.forecast_id))
@@ -353,6 +441,15 @@ def _tag(record, kind: str) -> dict:
     """Evidence ledger holds two record types; tag them on the way in."""
     payload = json.loads(to_json(record))
     payload["_kind"] = kind
+    payload["_v"] = LEDGER_SCHEMA
+    return payload
+
+
+def _tag_record(record) -> dict:
+    """Schema-tag a record on a single-type ledger (forecasts, outcomes).
+    These need the version too: an untagged record would be read as v1, so
+    a future writer could never be distinguished from a v1 record."""
+    payload = json.loads(to_json(record))
     payload["_v"] = LEDGER_SCHEMA
     return payload
 

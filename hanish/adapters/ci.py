@@ -38,11 +38,15 @@ SPECS = {
         # One final value closes the subject. That is what lets a sealed
         # stream with no matching observation legitimately mean MISS.
         emission=EmissionSemantics.TERMINAL,
+        # Only a seal from github-actions can certify the end of this
+        # channel. A seal from another source says nothing about it.
+        sources=(SOURCE,),
     ),
     DURATION_S: ObservableSpec(
         name=DURATION_S,
         value_type="float",
         emission=EmissionSemantics.PER_SUBJECT,
+        sources=(SOURCE,),
     ),
 }
 

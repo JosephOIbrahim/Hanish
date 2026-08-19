@@ -76,6 +76,12 @@ class ObservableSpec:
     name: str
     value_type: str                       # "bool" | "int" | "float" | "str"
     emission: EmissionSemantics
+    # Which source_refs can emit this observable. The completeness argument
+    # needs the channel binding: a seal names a (source, epoch), and only a
+    # seal from a source that actually emits this observable may certify its
+    # absence. A host that declares no sources forfeits absence-as-MISS and
+    # gets UNRESOLVABLE -- fail closed is the only honest default.
+    sources: tuple[str, ...] = ()
 
     def absence_is_informative(self) -> bool:
         """Can 'nothing arrived' ever mean 'it did not happen'?

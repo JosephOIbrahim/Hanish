@@ -3,6 +3,58 @@
 All notable changes to Hanish. Append-only, like the ledgers: a correction is
 a new entry, never an edit to an old one.
 
+## 0.1.1 — the guardian verdict
+
+The guardian attacked the v0.1.0 diff and found the laws were broken. Three
+P0s, three mediums, four lows — all verified with live probes, all closed
+here, each with a regression test in `tests/test_guardian.py`. The gates
+were green and the laws were still broken; the gates are now wrong.
+
+**P0-1 — a damaged record never bricks a rebuild.** `_rebuild` decoded each
+ledger record bare. A record that parsed as JSON but failed its decoder
+(missing fields, garbage enums) raised out of `Substrate.__init__`, and one
+hostile record bricked every future reopen. Decoders are now guarded: a
+record this build cannot interpret is corruption — skipped, counted
+(`corrupted`), never a brick. G4's loud failure for a *newer* schema version
+is preserved.
+
+**P0-2 — a poison observation cannot deny resolution.** `accepts()` and the
+`arrived_at`/`horizon` comparison sat outside the per-observation guard. One
+garbage `validity` or `arrived_at` aborted the whole `process()` pass — and,
+because the poison persists, every later pass too: a permanent, invisible
+denial of resolution. They are now inside the guard, counted once
+(`invalid_compare`), and the pass keeps draining.
+
+**P0-3 — completeness is scoped to the observable's channel.** A seal used
+to complete any stream whose epoch matched the forecast's subject. A seal
+from a source that never emits the forecast's observable could turn absence
+into MISS. `ObservableSpec` now declares which `sources` emit it; a seal
+from any other source says nothing and absence stays UNRESOLVABLE.
+
+**M-1** repair's read+truncate now runs under the append lock, so a
+concurrent writer's record can never be eaten by a stale truncate. The
+stress test that proved it found the lock protocol itself broken: the
+contention probe (`_lock.__enter__` reading byte 0 to seed the byte the
+runtime needs) collided with Windows' mandatory byte-range lock — while a
+holder owns byte 0, every other handle that *reads* it raises
+PermissionError instead of waiting. The probe now uses `getsize` (directory
+metadata, region-free) and the seed write lands at EOF (append mode), so
+contenders only ever wait on the lock itself.
+**M-2** forecasts and outcomes are now `_v`-tagged and version-gated like
+evidence — a future writer on any ledger fails loud. **M-3** an
+UNRESOLVABLE closure is housekeeping, not a verdict: valid in-time evidence
+may reopen it; a settled RESOLVED never changes. **L-1** `status(at)` no
+longer raises on a malformed clock. **L-2** a whitespace torn tail is
+truncated and counted like any other. **L-4** dead code (`locked()`,
+`read()`) removed.
+
+### Law status
+
+The eight laws stand again. The guardian verified the soundness of
+cross-process dedup, tail accounting, and domain-blindness while it was
+here. The digest's "eight laws standing (guardian audit pending)" was
+premature — it is amended in `harness/digest.md`.
+
 ## 0.1.0 — the lattice
 
 The refactor target from HARNESS.md. The core becomes an explicit lattice,

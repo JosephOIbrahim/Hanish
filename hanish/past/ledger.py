@@ -24,11 +24,10 @@ never misread newer data.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from dataclasses import asdict
 from enum import Enum
 from pathlib import Path
@@ -64,8 +63,12 @@ class _lock:
 
     def __enter__(self):
         self._fh = open(self.path, "a+b")
-        self._fh.seek(0)
-        if self._fh.read(1) == b"":          # msvcrt needs a byte to lock
+        # msvcrt needs a byte to lock. We may NOT read(1) to check: Windows
+        # byte-range locks are mandatory, so a holder's locked byte 0 raises
+        # PermissionError in every other handle that touches it. getsize()
+        # reads directory metadata (region-free), and the append-mode write
+        # lands at EOF -- neither ever enters the lock region.
+        if os.path.getsize(self.path) == 0:
             self._fh.write(b"\0")
             self._fh.flush()
         self._fh.seek(0)
@@ -150,50 +153,57 @@ class Ledger:
             self._write_durable(json.dumps(payload, sort_keys=True) + "\n")
             return True
 
-    @contextlib.contextmanager
-    def locked(self):
-        """Hold the append lock across a caller block (dedup decisions)."""
-        with _lock(self.path):
-            yield
-
     # -- reads ----------------------------------------------------------------
 
     def repair(self) -> Iterator[dict]:
         """One pass over the whole ledger: repair, count, yield.
 
-        A JSONDecodeError on the final line is a torn tail -- a write that
-        died before its newline. It is truncated away and counted
-        (tail_loss); the ledger never contained a valid record there. On a
-        non-final line it is corruption: the line is skipped and counted
-        (corrupted), never fabricated. Either way the ledger stays open --
-        a damaged byte is not allowed to brick a rebuild.
+        Runs under the append lock: the read, the scan, and any truncate
+        share one critical section, so a concurrent writer's record can
+        never be eaten by a truncate computed from a stale read.
 
-        Reads in binary and tracks byte offsets exactly. Text-mode offsets
-        are wrong on Windows (tell() counts the newline-translated stream),
-        and a wrong offset in a truncate would eat a valid record."""
-        with open(self.path, "rb") as fh:
-            data = fh.read()
+        A final line that cannot be parsed -- or that is only whitespace,
+        which is what a write that died before its newline can look like --
+        is a torn tail. It is truncated away and counted (tail_loss); the
+        ledger never contained a valid record there. On a non-final line it
+        is corruption: skipped and counted (corrupted), never fabricated.
+        Either way the ledger stays open -- a damaged byte is not allowed
+        to brick a rebuild.
 
-        lines = data.split(b"\n")
-        # The split ends in an empty element when the file ends with a
-        # newline. A torn tail can only exist where the file ends WITHOUT
-        # one -- the write died before its newline got out.
-        tail_idx = len(lines) - 1 if data and not data.endswith(b"\n") else -1
-        offset = 0
-        for i, line in enumerate(lines):
-            off = offset
-            offset += len(line) + 1                 # +1 for the \n itself
-            if not line.strip():
-                continue
-            try:
-                yield json.loads(line.decode("utf-8", "strict").strip())
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                if i == tail_idx:
-                    with open(self.path, "r+b") as fh:
-                        fh.truncate(off)
-                    self.tail_loss += 1
-                    break
-                self.corrupted += 1
+        Reads in binary and tracks offsets exactly. Text-mode offsets are
+        wrong on Windows (tell() counts the newline-translated stream), and
+        a wrong offset in a truncate would eat a valid record."""
+        records: list[dict] = []
+        with _lock(self.path):
+            with open(self.path, "rb") as fh:
+                data = fh.read()
+
+            lines = data.split(b"\n")
+            # The tail is empty when the file ends WITH a newline. A torn
+            # tail can only exist where the file ends WITHOUT one -- the
+            # write died before its newline got out.
+            tail_idx = len(lines) - 1 if data and not data.endswith(b"\n") else -1
+            offset = 0
+            for i, line in enumerate(lines):
+                off = offset
+                offset += len(line) + 1             # +1 for the \n itself
+                if not line.strip():
+                    if i == tail_idx:               # torn write of whitespace
+                        with open(self.path, "r+b") as fh:
+                            fh.truncate(off)
+                        self.tail_loss += 1
+                        break
+                    continue
+                try:
+                    records.append(json.loads(line.decode("utf-8", "strict").strip()))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    if i == tail_idx:
+                        with open(self.path, "r+b") as fh:
+                            fh.truncate(off)
+                        self.tail_loss += 1
+                        break
+                    self.corrupted += 1
+        yield from records
 
     def raw(self) -> Iterator[dict]:
         """Yield parsed records as the ledger is right now.
@@ -213,10 +223,6 @@ class Ledger:
                 yield json.loads(s)
             except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
-
-    def read(self, decoder: Callable[[dict], Any]) -> Iterator[Any]:
-        for rec in self.raw():
-            yield decoder(rec)
 
     def __len__(self) -> int:
         return sum(1 for _ in self.raw())

@@ -91,10 +91,19 @@ ledgers that rebuild all state on open, forecasts that resolve against
 observable streams, and — the frontier — a harness that runs the team on the
 substrate itself.
 
-**2. Standing.** Eight laws standing (guardian audit pending). Gates G1–G5
-green by their tests; G6–G7 green by full suite + ruff + demo. G8 (host #2
-adapter) not built. G9 (ship) green: `hanish-0.1.0` builds, lint clean,
-CHANGELOG present, released on GitHub (`v0.1.0`). Open flights: 3.
+**2. Standing.** Eight laws standing — now *audited*, and the audit caught
+them broken. **Amendment:** the previous instance's "guardian audit pending"
+was resolved the hard way: the guardian attacked the v0.1.0 diff and found
+the gates green while the laws were broken. Three P0s (damaged record bricks
+rebuild; poison observation denies resolution; foreign seal launders absence
+into MISS), three mediums, four lows — all verified with live probes, all
+closed in 0.1.1 with a regression test each (`tests/test_guardian.py`). The
+stress test that proved M-1 then found a fifth concurrency law-break: the
+lock protocol's byte-0 probe collided with Windows' mandatory byte-range
+lock (concurrent contender raised instead of waiting). All closed; the gates
+that were green-and-wrong are now red-and-right. Gates G1–G9 green by
+`pytest tests/ -q` (41), ruff, demo. G8 (host #2 adapter) not built. G9
+green: `hanish-0.1.1` builds, released on GitHub (`v0.1.1`). Open flights: 2.
 Regressions: 0.
 
 **3. What landed.**
@@ -106,6 +115,11 @@ Regressions: 0.
 | PAST | cross-process once-only | G3 | `append_observation_once` under the lock | *unpushed* |
 | PAST | schema versioning | G4 | `_v` tag, future-version fails loud | *unpushed* |
 | PAST | never-raise `process()` | G1 | `present/substrate.py` — OUTWARD/INWARD | *unpushed* |
+| GUARDIAN | P0-1 damaged record never bricks rebuild | G2 | `substrate.py _rebuild` — guarded decoders | *this flight* |
+| GUARDIAN | P0-2 poison obs can't deny resolution | G1 | `_resolve_from_evidence` per-obs guard | *this flight* |
+| GUARDIAN | P0-3 seals scoped to observable's source | G5 | `ObservableSpec.sources` + `_stream_complete` | *this flight* |
+| GUARDIAN | M-1..M-3, L-1/L-2/L-4 + the lock probe | G2/G3/G4 | `ledger.py`, `status()`, `_version_ok` | *this flight* |
+| GUARDIAN | regression suite, 10 tests that bite | — | `tests/test_guardian.py` | *this flight* |
 
 **4. What was discarded.** None under the KEEP/DISCARD protocol (first real
 flight). The G2 tests caught a genuine ledger defect — the torn-tail check
@@ -113,10 +127,11 @@ keyed off the last split element (which a trailing newline makes empty) and
 damage counters double-counted across the `_count` and rebuild passes. That is
 fixed, not discarded.
 
-**5. The numbers.** 31 tests pass; ruff clean; demo runs; package builds
-(`hanish-0.1.0`). The substrate's own root (gitignored) holds one authored
-forecast, resolved: **HIT**, brier 0.0625 — the team's first self-measurement
-by its own instrument.
+**5. The numbers.** 41 tests pass — the 31 of v0.1.0 plus the guardian's 10,
+each a regression that would have caught the release. ruff clean; demo runs;
+package builds (`hanish-0.1.1`). The substrate's own root (gitignored) holds
+one authored forecast, resolved: **HIT**, brier 0.0625 — the team's first
+self-measurement by its own instrument.
 
 **6. The frontier.** `harness/root` (host #2, bootstrapped) carried the first
 self-forecast: `f_c57a1c3bc61f`, BLIND, p=0.75, claim "flight-past-1 lands
@@ -129,13 +144,14 @@ was scored on it.
 
 | thread | why next |
 |---|---|
-| guardian audit of the landed diff | the only gate G1–G5 don't prove is the adversary's |
 | flight PRESENT → FUTURE → HOST-2 | G8 host #2 is the remaining gate |
 | this digest → FINAL | when the journal has no open items |
 
 **8. Resume protocol.** Boot per `orchestrator.md`. Verify:
-`python -m pytest tests/ -q && python -m ruff check hanish/ tests/ demo.py`.
-Next thread: the guardian attack on the landed diff, then the journal resolve.
+`python -m pytest tests/ -q && python -m ruff check hanish/ tests/ demo.py && python demo.py`.
+Next thread: G8 — a second host adapter (the only gate not yet proven), then
+the journal resolve. The guardian is done for this diff; it moves to the next
+landing.
 
 **9. Teach-down (human).** The substrate is a scoring notebook that trusts
 nothing and loses nothing. `demo.py` shows it in one read: author a forecast,
