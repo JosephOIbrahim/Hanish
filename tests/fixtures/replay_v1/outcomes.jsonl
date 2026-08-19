@@ -1,0 +1,1 @@
+{"_v":1,"brier":0.0625,"calibration_eligible":true,"forecast_id":"f_replay_v1","observation_key":["github-actions","run-fixture:attempt-1:required_checks"],"observed":true,"outcome_id":"o_replay_v1","predicted":0.75,"reason":"first valid terminal observation","resolved_at":"2026-01-01T00:21:00+00:00","terminal":"RESOLVED","verdict":"HIT"}
