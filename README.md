@@ -1,4 +1,4 @@
-# Temporal Cognitive Substrate — V0.0
+# Hanish — Temporal Cognitive Substrate — V0.0
 
 **One forecast. One external observation. One durable outcome. No scheduler.**
 
@@ -22,7 +22,7 @@ not what any name means, not what units anything is in, not what actions
 exist, not whether anything is good.
 
 ```
-temporal/
+hanish/
   core/            domain-blind. imports stdlib and itself. nothing more.
     types.py       four identities, enums, frozen dataclasses
     ledger.py      append-only JSONL, fsync per record

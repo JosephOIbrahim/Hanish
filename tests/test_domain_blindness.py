@@ -16,7 +16,7 @@ import ast
 import re
 from pathlib import Path
 
-CORE = Path(__file__).resolve().parents[1] / "temporal" / "core"
+CORE = Path(__file__).resolve().parents[1] / "hanish" / "core"
 
 # Nouns from every host we have or plan. If one of these appears in core,
 # the substrate has quietly become a tool for one application.

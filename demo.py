@@ -17,9 +17,9 @@ import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from temporal import Substrate
-from temporal.adapters.ci import REQUIRED_CHECKS_PASS, CIAdapter
-from temporal.core.types import (
+from hanish import Substrate
+from hanish.adapters.ci import REQUIRED_CHECKS_PASS, CIAdapter
+from hanish.core.types import (
     Comparator,
     Exposure,
     Forecast,

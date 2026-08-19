@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "temporal-substrate"
+name = "hanish"
 version = "0.0.0"
-description = "Temporal Cognitive Substrate — a type system for time plus a scoreboard"
+description = "Hanish — a type system for time plus a scoreboard"
 readme = "README.md"
 requires-python = ">=3.11"
 # The core has zero runtime dependencies by design. A substrate with a
@@ -16,7 +16,7 @@ dependencies = []
 dev = ["pytest>=8", "ruff>=0.6"]
 
 [tool.setuptools.packages.find]
-include = ["temporal*"]
+include = ["hanish*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
