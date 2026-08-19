@@ -93,7 +93,9 @@ substrate itself.
 
 **2. Standing.** Eight laws standing (guardian audit pending). Gates G1–G5
 green by their tests; G6–G7 green by full suite + ruff + demo. G8 (host #2
-adapter) not built. G9 (ship) pending. Open flights: 4. Regressions: 0.
+adapter) not built. G9 (ship) green: `hanish-0.1.0` builds, lint clean,
+CHANGELOG present, released on GitHub (`v0.1.0`). Open flights: 3.
+Regressions: 0.
 
 **3. What landed.**
 
@@ -127,8 +129,8 @@ was scored on it.
 
 | thread | why next |
 |---|---|
-| guardian audit of this diff | the only gate G1–G5 don't prove is the adversary's |
-| flight PRESENT → FUTURE → HOST-2 → SHIP | G8 host #2, G9 release-ship done — remaining gates first |
+| guardian audit of the landed diff | the only gate G1–G5 don't prove is the adversary's |
+| flight PRESENT → FUTURE → HOST-2 | G8 host #2 is the remaining gate |
 | this digest → FINAL | when the journal has no open items |
 
 **8. Resume protocol.** Boot per `orchestrator.md`. Verify:
