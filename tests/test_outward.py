@@ -24,6 +24,7 @@ from hanish.past.events import (
     ObservationEvent,
     Verdict,
 )
+from tests._support import created_before
 
 SHA = "abc123"
 LATER = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
@@ -36,7 +37,8 @@ def build(tmp_path, comparator=Comparator.EQ, threshold=True):
         subject_ref=ci.subject_ref(SHA),
         claim="next valid required-check result for this code state passes",
         probability=0.8,
-        exposure=Exposure.BLIND,
+        exposure=Exposure.EXPOSED,
+        created_at=created_before(LATER),
         world_ref=ci.world_ref(SHA, "wf1", "lock1"),
         world_ref_capability=ci.world_ref_capability,
         resolution=ResolutionSpec(
@@ -50,20 +52,21 @@ def build(tmp_path, comparator=Comparator.EQ, threshold=True):
 
 
 def test_incomparable_observation_never_crashes_process(tmp_path):
-    """P1 repro: a value of the wrong type against a GT comparison used to
-    raise TypeError out of process(). Now: no raise, counted, no score."""
+    """P1 repro: a wrong-typed value is dropped before persistence and can
+    neither crash process() nor become a score."""
     ci, sub, f = build(tmp_path, comparator=Comparator.GT, threshold=True)
     fid = sub.author(f)
 
-    sub.capture(ObservationEvent(
-        source_ref="x", event_id="e1", subject_ref=ci.subject_ref(SHA),
+    assert sub.capture(ObservationEvent(
+        source_ref=ci.source_ref, event_id="e1", subject_ref=ci.subject_ref(SHA),
         observable=REQUIRED_CHECKS_PASS, value="garbage",     # str vs bool
-    ))
+    )) is False
 
     out = sub.process()                     # must not raise
     assert out == []                        # malformed evidence scores nothing
-    assert sub.invalid_compare == 1
-    assert sub.status()["capture"]["invalid_compare"] == 1
+    assert sub.invalid_compare == 0
+    assert sub.status()["capture"]["invalid_compare"] == 0
+    assert sub.dropped == 1
     assert fid not in sub.outcomes          # still open
 
 
@@ -72,16 +75,17 @@ def test_after_a_bad_observation_a_good_one_still_scores(tmp_path):
     ci, sub, f = build(tmp_path, comparator=Comparator.GT, threshold=False)
     sub.author(f)
 
-    sub.capture(ObservationEvent(
-        source_ref="x", event_id="e1", subject_ref=ci.subject_ref(SHA),
-        observable=REQUIRED_CHECKS_PASS, value="garbage"))
+    assert sub.capture(ObservationEvent(
+        source_ref=ci.source_ref, event_id="e1", subject_ref=ci.subject_ref(SHA),
+        observable=REQUIRED_CHECKS_PASS, value="garbage")) is False
     sub.process()
-    assert sub.invalid_compare == 1
+    assert sub.invalid_compare == 0
 
     sub.capture(ci.checks_result(SHA, run_id="481", attempt=1, passed=True))
     out = sub.process()
     assert out[0].verdict is Verdict.HIT
-    assert sub.invalid_compare == 1         # counted once, not re-counted
+    assert sub.invalid_compare == 0
+    assert sub.dropped == 1
 
 
 def test_process_never_raises_on_a_defective_internals(tmp_path, monkeypatch):
@@ -109,7 +113,7 @@ def test_naive_horizon_rejected_at_authoring(tmp_path):
             subject_ref=ci.subject_ref(SHA),
             claim="naive horizon must never reach process",
             probability=0.5,
-            exposure=Exposure.BLIND,
+            exposure=Exposure.EXPOSED,
             resolution=ResolutionSpec(
                 observable=REQUIRED_CHECKS_PASS,
                 comparator=Comparator.EQ,

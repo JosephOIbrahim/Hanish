@@ -60,7 +60,7 @@ def test_core_has_no_third_party_dependencies():
     stdlib_ok = {
         "json", "os", "uuid", "hashlib", "dataclasses", "datetime", "enum",
         "typing", "pathlib", "__future__", "collections", "itertools",
-        "msvcrt", "fcntl", "time", "contextlib",
+        "msvcrt", "fcntl", "time", "contextlib", "math",
     }
     for path in _core_files():
         tree = ast.parse(path.read_text())

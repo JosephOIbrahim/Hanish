@@ -22,6 +22,7 @@ from hanish.adapters.ci import REQUIRED_CHECKS_PASS, CIAdapter
 from hanish.future.claims import (
     Comparator,
     Exposure,
+    ExposureBasis,
     Forecast,
     ResolutionSpec,
 )
@@ -34,11 +35,25 @@ def rule(title):
 
 
 def make_forecast(ci, probability, horizon):
+    created_at = (datetime.fromisoformat(horizon) - timedelta(hours=2)).isoformat()
     return Forecast(
         subject_ref=ci.subject_ref(SHA),
         claim="next valid required-check result for this code state passes",
         probability=probability,
-        exposure=Exposure.BLIND,          # authored after the final commit
+        exposure=Exposure.BLIND,
+        exposure_basis=ExposureBasis(
+            author_ref="human",
+            seen_by=(),
+            capable_actors=("ci-runner",),
+            seen_by_complete=True,
+            capable_actors_complete=True,
+            separation_control_ref="commit-frozen-before-forecast",
+            attested_by="demo-host",
+            attested_at=(
+                datetime.fromisoformat(created_at) - timedelta(seconds=1)
+            ).isoformat(),
+        ),
+        created_at=created_at,
         world_ref=ci.world_ref(SHA, "workflow-v8", "lock-9f2a"),
         world_ref_capability=ci.world_ref_capability,
         authored_by="human",

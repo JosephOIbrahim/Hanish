@@ -38,6 +38,7 @@ from hanish.past.events import (
     Verdict,
 )
 from hanish.past.ledger import Ledger
+from tests._support import created_before
 
 SHA = "abc123"
 PAST = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
@@ -51,7 +52,8 @@ def build(tmp_path, horizon=LATER):
         subject_ref=ci.subject_ref(SHA),
         claim="guardian target",
         probability=0.7,
-        exposure=Exposure.BLIND,
+        exposure=Exposure.EXPOSED,
+        created_at=created_before(horizon),
         world_ref=ci.world_ref(SHA, "wf1", "lock1"),
         world_ref_capability=ci.world_ref_capability,
         resolution=ResolutionSpec(
@@ -128,28 +130,29 @@ def test_semantically_broken_record_never_bricks_reopen(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_poison_record_cannot_deny_resolution(tmp_path):
-    """An unparseable arrived_at / validity used to abort the WHOLE process()
-    pass -- and, since the poison persisted, every later pass died too. Now:
-    counted once (invalid_compare), and a good observation still scores."""
+    """Malformed timestamps and validity are rejected at capture, never
+    persisted, and cannot prevent a later good observation from resolving."""
     ci, sub, f = build(tmp_path)
     sub.author(f)
 
-    sub.capture(ObservationEvent(
-        source_ref="x", event_id="e_poison",
+    assert sub.capture(ObservationEvent(
+        source_ref=ci.source_ref, event_id="e_poison",
         subject_ref=ci.subject_ref(SHA),
         observable=REQUIRED_CHECKS_PASS, value=True,
         arrived_at="not-a-timestamp",
-    ))
-    sub.capture(ObservationEvent(
-        source_ref="x", event_id="e_poison2",
+    )) is False
+    assert sub.capture(ObservationEvent(
+        source_ref=ci.source_ref, event_id="e_poison2",
         subject_ref=ci.subject_ref(SHA),
         observable=REQUIRED_CHECKS_PASS, value=True,
         validity="GARBAGE",
-    ))
+    )) is False
 
     assert sub.process() == []                  # neither poison scores
     assert sub.process_errors == 0              # not a denial of resolution
-    assert sub.invalid_compare == 2             # both counted, fail-closed
+    assert sub.invalid_compare == 0             # neither reached comparison
+    assert sub.dropped == 2
+    assert list(sub.evidence_l.raw()) == []
 
     sub.capture(ci.checks_result(SHA, run_id="481", attempt=1, passed=True))
     out = sub.process()
@@ -172,7 +175,8 @@ def test_seal_from_an_unrelated_source_cannot_close_my_stream(tmp_path):
         subject_ref=ci.subject_ref(SHA),
         claim="checks will pass",
         probability=0.6,
-        exposure=Exposure.BLIND,
+        exposure=Exposure.EXPOSED,
+        created_at=created_before(PAST),
         resolution=ResolutionSpec(
             observable=REQUIRED_CHECKS_PASS, comparator=Comparator.EQ,
             threshold=True, horizon=PAST,
@@ -200,7 +204,8 @@ def test_seal_from_an_unrelated_source_cannot_close_my_stream(tmp_path):
         subject_ref=ci.subject_ref("f00d"),
         claim="own channel passes",
         probability=0.5,
-        exposure=Exposure.BLIND,
+        exposure=Exposure.EXPOSED,
+        created_at=created_before(PAST),
         resolution=ResolutionSpec(
             observable=REQUIRED_CHECKS_PASS, comparator=Comparator.EQ,
             threshold=True, horizon=PAST,
@@ -241,9 +246,12 @@ def test_forecasts_and_outcomes_are_schema_tagged(tmp_path):
     sub.capture(ci.checks_result(SHA, "481", 1, passed=True))
     sub.process()
 
-    for name in ("forecasts", "outcomes"):
+    expected = {"forecasts": "forecast", "outcomes": "outcome"}
+    for name, kind in expected.items():
         first = (sub.root / f"{name}.jsonl").read_text().splitlines()[0]
-        assert json.loads(first)["_v"] == 1
+        payload = json.loads(first)
+        assert payload["_v"] == 2
+        assert payload["_kind"] == kind
 
 
 # ---------------------------------------------------------------------------
