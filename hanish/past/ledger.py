@@ -27,8 +27,8 @@ from __future__ import annotations
 import json
 import os
 import time
-from collections.abc import Iterator
-from dataclasses import asdict
+from collections.abc import Callable, Iterator
+from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -51,6 +51,22 @@ def to_json(obj: Any) -> str:
             return list(o)
         raise TypeError(type(o))
     return json.dumps(asdict(obj), default=enc, sort_keys=True)
+
+
+@dataclass(frozen=True)
+class AtomicAppendResult:
+    """Result of a lock-scoped synchronization and conditional append.
+
+    ``records`` contains every durable record discovered since this Ledger
+    instance's previous watermark, including the candidate when it won. A
+    caller can therefore merge a racing writer's record immediately instead
+    of waiting for a process restart.
+    """
+
+    appended: bool
+    records: tuple[dict, ...]
+    winner: dict | None = None
+    conflict: bool = False
 
 
 class _lock:
@@ -101,19 +117,137 @@ class Ledger:
         self.path.touch(exist_ok=True)
         self.tail_loss = 0
         self.corrupted = 0
-        # One integrity pass at construction: repair the tail, count the
-        # damage, count the records. raw() afterwards is read-only and
-        # never re-counts -- accounting happens exactly here.
-        self._count = sum(1 for _ in self.repair())
+        self._records: list[dict] = []
+        self._watermark = 0
+        self._file_identity: tuple[int, int] | None = None
+        self._unique_indexes: dict[tuple[str, ...], dict[tuple, dict]] = {}
+        self._multi_indexes: dict[tuple[str, ...], dict[tuple, list[dict]]] = {}
+
+        # One cold integrity pass. Subsequent synchronized operations read
+        # only bytes appended after this exact complete-line watermark.
+        with _lock(self.path):
+            self._full_rescan_locked()
 
     # -- appends ------------------------------------------------------------
 
     def _write_durable(self, line: str) -> None:
         """fsync'd append, no locking. Call only under _lock."""
-        with open(self.path, "a", encoding="utf-8") as fh:
-            fh.write(line)
+        # Binary mode keeps the byte watermark exact on Windows; text mode
+        # would translate ``\n`` to ``\r\n`` after the byte count was taken.
+        with open(self.path, "ab") as fh:
+            fh.write(line.encode("utf-8"))
             fh.flush()
             os.fsync(fh.fileno())
+
+    @staticmethod
+    def _canonical_payload(payload: dict) -> str:
+        return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+    def _remember(self, record: dict) -> None:
+        self._records.append(record)
+        for fields, index in self._unique_indexes.items():
+            key = tuple(record.get(field) for field in fields)
+            index.setdefault(key, record)
+        for fields, index in self._multi_indexes.items():
+            key = tuple(record.get(field) for field in fields)
+            index.setdefault(key, []).append(record)
+
+    def _identity(self) -> tuple[int, int]:
+        stat = self.path.stat()
+        return (stat.st_dev, stat.st_ino)
+
+    def _parse_complete_lines(self, data: bytes) -> list[dict]:
+        records: list[dict] = []
+        for line in data.split(b"\n"):
+            if not line.strip():
+                continue
+            try:
+                records.append(json.loads(line.decode("utf-8", "strict").strip()))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self.corrupted += 1
+        return records
+
+    def _full_rescan_locked(self) -> list[dict]:
+        """Repair and rebuild the operational snapshot under the file lock."""
+        with open(self.path, "rb") as fh:
+            data = fh.read()
+
+        if data and not data.endswith(b"\n"):
+            boundary = data.rfind(b"\n") + 1
+            with open(self.path, "r+b") as fh:
+                fh.truncate(boundary)
+            data = data[:boundary]
+            self.tail_loss += 1
+
+        records = self._parse_complete_lines(data)
+        self._records = records
+        self._count = len(records)
+        self._watermark = len(data)
+        self._file_identity = self._identity()
+        self._unique_indexes.clear()
+        self._multi_indexes.clear()
+        return list(records)
+
+    def _sync_tail_locked(self) -> list[dict]:
+        """Read complete records since the local byte watermark.
+
+        Replacement, truncation, or a watermark that is no longer on a line
+        boundary triggers a safe full rescan. Ordinary cross-process appends
+        stay proportional to the newly appended tail.
+        """
+        size = self.path.stat().st_size
+        identity = self._identity()
+        invalid_watermark = (
+            identity != self._file_identity
+            or self._watermark > size
+        )
+        tail = b""
+        if not invalid_watermark:
+            with open(self.path, "rb") as fh:
+                if self._watermark:
+                    fh.seek(self._watermark - 1)
+                    invalid_watermark = fh.read(1) != b"\n"
+                if not invalid_watermark:
+                    fh.seek(self._watermark)
+                    tail = fh.read()
+        if invalid_watermark:
+            before = len(self._records)
+            records = self._full_rescan_locked()
+            return records if before else list(records)
+        if not tail:
+            return []
+
+        if not tail.endswith(b"\n"):
+            relative_boundary = tail.rfind(b"\n") + 1
+            boundary = self._watermark + relative_boundary
+            if boundary < self._watermark:
+                records = self._full_rescan_locked()
+                return list(records)
+            with open(self.path, "r+b") as fh:
+                fh.truncate(boundary)
+            tail = tail[:relative_boundary]
+            size = boundary
+            self.tail_loss += 1
+
+        records = self._parse_complete_lines(tail)
+        for record in records:
+            self._remember(record)
+        self._count += len(records)
+        self._watermark = size
+        self._file_identity = self._identity()
+        return records
+
+    def _append_payload_locked(self, payload: dict) -> int:
+        # Preserve the human-readable on-disk v1 formatting. Canonical JSON
+        # is used for identity comparisons, not to rewrite ledger history.
+        line = json.dumps(payload, sort_keys=True) + "\n"
+        offset = self._count
+        self._write_durable(line)
+        self._remember(payload)
+        self._count += 1
+        self._watermark += len(line.encode("utf-8"))
+        self._file_identity = self._identity()
+        return offset
 
     def append(self, record: Any) -> int:
         """Append one record durably. Returns its offset.
@@ -121,20 +255,99 @@ class Ledger:
         Durability matters here and only here: everything else in the system
         is derived from the ledgers, so a record that survives fsync is a
         record the system can rebuild itself from."""
-        with _lock(self.path):
-            self._write_durable(to_json(record) + "\n")
-        offset = self._count
-        self._count += 1
-        return offset
+        return self.append_dict(json.loads(to_json(record)))
 
     def append_dict(self, payload: dict) -> int:
         """Append a pre-built dict. Used where a record needs a type tag
         alongside its dataclass fields (the evidence ledger holds two kinds)."""
         with _lock(self.path):
-            self._write_durable(json.dumps(payload, sort_keys=True) + "\n")
-        offset = self._count
-        self._count += 1
-        return offset
+            self._sync_tail_locked()
+            return self._append_payload_locked(payload)
+
+    def synchronize(self) -> tuple[dict, ...]:
+        """Return records appended by other processes since the last sync."""
+        with _lock(self.path):
+            return tuple(self._sync_tail_locked())
+
+    def append_unique(self, payload: dict, identity_fields: tuple[str, ...]) -> AtomicAppendResult:
+        """Append once for a durable composite identity.
+
+        An exact retry is accepted without another write. Reusing an identity
+        for different canonical content is surfaced as a conflict.
+        """
+        identity = tuple(payload.get(field) for field in identity_fields)
+        with _lock(self.path):
+            discovered = self._sync_tail_locked()
+            index = self._unique_indexes.get(identity_fields)
+            if index is None:
+                index = {}
+                for record in self._records:
+                    key = tuple(record.get(field) for field in identity_fields)
+                    index.setdefault(key, record)
+                self._unique_indexes[identity_fields] = index
+
+            winner = index.get(identity)
+            if winner is not None:
+                conflict = self._canonical_payload(winner) != self._canonical_payload(payload)
+                return AtomicAppendResult(
+                    appended=False,
+                    records=tuple(discovered),
+                    winner=winner,
+                    conflict=conflict,
+                )
+
+            self._append_payload_locked(payload)
+            return AtomicAppendResult(
+                appended=True,
+                records=tuple([*discovered, payload]),
+                winner=payload,
+            )
+
+    def compare_and_append(
+        self,
+        payload: dict,
+        identity_fields: tuple[str, ...],
+        transition_allowed: Callable[[tuple[dict, ...], dict], bool],
+    ) -> AtomicAppendResult:
+        """Atomically append when a caller-defined monotone transition holds."""
+        identity = tuple(payload.get(field) for field in identity_fields)
+        with _lock(self.path):
+            discovered = self._sync_tail_locked()
+            index = self._multi_indexes.get(identity_fields)
+            if index is None:
+                index = {}
+                for record in self._records:
+                    key = tuple(record.get(field) for field in identity_fields)
+                    index.setdefault(key, []).append(record)
+                self._multi_indexes[identity_fields] = index
+
+            existing = tuple(index.get(identity, ()))
+            for record in existing:
+                if self._canonical_payload(record) == self._canonical_payload(payload):
+                    return AtomicAppendResult(
+                        appended=False,
+                        records=tuple(discovered),
+                        winner=record,
+                    )
+            if not transition_allowed(existing, payload):
+                return AtomicAppendResult(
+                    appended=False,
+                    records=tuple(discovered),
+                    winner=existing[-1] if existing else None,
+                    conflict=True,
+                )
+
+            self._append_payload_locked(payload)
+            return AtomicAppendResult(
+                appended=True,
+                records=tuple([*discovered, payload]),
+                winner=payload,
+            )
+
+    def sync_observation_once(self, payload: dict, dedup_key: tuple) -> AtomicAppendResult:
+        if (payload.get("source_ref"), payload.get("event_id")) != dedup_key:
+            raise ValueError("observation payload does not match its dedup identity")
+        return self.append_unique(payload, ("source_ref", "event_id"))
 
     def append_observation_once(self, payload: dict, dedup_key: tuple) -> bool:
         """The cross-process once-only guarantee.
@@ -143,15 +356,7 @@ class Ledger:
         append loses and returns False. Otherwise it is written and True is
         returned. The scan and the write share one lock, so two hosts
         capturing the same envelope cannot both win."""
-        with _lock(self.path):
-            for rec in self.raw():
-                if rec.get("_kind") != "observation":
-                    continue
-                if (rec.get("source_ref") == dedup_key[0]
-                        and rec.get("event_id") == dedup_key[1]):
-                    return False
-            self._write_durable(json.dumps(payload, sort_keys=True) + "\n")
-            return True
+        return self.sync_observation_once(payload, dedup_key).appended
 
     # -- reads ----------------------------------------------------------------
 
@@ -173,37 +378,8 @@ class Ledger:
         Reads in binary and tracks offsets exactly. Text-mode offsets are
         wrong on Windows (tell() counts the newline-translated stream), and
         a wrong offset in a truncate would eat a valid record."""
-        records: list[dict] = []
         with _lock(self.path):
-            with open(self.path, "rb") as fh:
-                data = fh.read()
-
-            lines = data.split(b"\n")
-            # The tail is empty when the file ends WITH a newline. A torn
-            # tail can only exist where the file ends WITHOUT one -- the
-            # write died before its newline got out.
-            tail_idx = len(lines) - 1 if data and not data.endswith(b"\n") else -1
-            offset = 0
-            for i, line in enumerate(lines):
-                off = offset
-                offset += len(line) + 1             # +1 for the \n itself
-                if not line.strip():
-                    if i == tail_idx:               # torn write of whitespace
-                        with open(self.path, "r+b") as fh:
-                            fh.truncate(off)
-                        self.tail_loss += 1
-                        break
-                    continue
-                try:
-                    records.append(json.loads(line.decode("utf-8", "strict").strip()))
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    if i == tail_idx:
-                        with open(self.path, "r+b") as fh:
-                            fh.truncate(off)
-                        self.tail_loss += 1
-                        break
-                    self.corrupted += 1
-        yield from records
+            yield from self._full_rescan_locked()
 
     def raw(self) -> Iterator[dict]:
         """Yield parsed records as the ledger is right now.
