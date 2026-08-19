@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "temporal-substrate"
+version = "0.0.0"
+description = "Temporal Cognitive Substrate — a type system for time plus a scoreboard"
+readme = "README.md"
+requires-python = ">=3.11"
+# The core has zero runtime dependencies by design. A substrate with a
+# dependency tree is a substrate that rots.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[tool.setuptools.packages.find]
+include = ["temporal*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
