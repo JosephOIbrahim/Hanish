@@ -1,9 +1,14 @@
-"""Hanish — Temporal Cognitive Substrate, V0.0.
+"""Hanish — Temporal Cognitive Substrate, V0.1.
 
-A type system for time plus a scoreboard. Domain-blind core; adapters import
-core; core imports nothing from adapters.
+A type system for time plus a scoreboard. The core is a lattice, oldest to
+newest:
+
+    time ← past ← future ← present ← adapters
+
+Nothing in a lower layer imports from a higher one. Adapters may translate
+names and package values; they may never infer conclusions.
 """
 
-from .core.substrate import Substrate
+from .present.substrate import Substrate
 
 __all__ = ["Substrate"]

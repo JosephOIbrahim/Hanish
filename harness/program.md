@@ -28,8 +28,10 @@ can't audit is not a substrate.
 2. The director boots the substrate, reads the journal, picks the next open work
    item from the phase order in HARNESS.md, authors a forecast, spawns a wave.
 3. The verifier runs the gates. The guardian attacks. KEEP only on green.
-4. When the journal has no open items: the director writes `digest.md` and stands
-   down. You wake up to a digest, not to a process.
+4. When the journal has no open items: the director writes `harness/digest.md`
+   (state FINAL) per the digest spec and stands down. A CHECKPOINT is written at
+   every flight boundary, so a crash anywhere in the loop wakes to the last
+   interpretation, not a cold start. You wake up to a digest, not to a process.
 
 ## The plan (current)
 

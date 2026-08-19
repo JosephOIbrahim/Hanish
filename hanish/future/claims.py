@@ -1,41 +1,28 @@
-"""Core temporal types.
+"""The FUTURE. Contracts about what will be observed.
 
-Everything here is domain-blind. Identities are opaque strings; the core
-never interprets them. If a domain noun (commit, cook, node, render, frame,
-shader, build, test) appears in this module, an invariant has been violated.
+Nothing in this layer opens a ledger or touches the present. It is pure
+declaration: what a forecast means, what a resolution looks like, what the
+comparison vocabulary is. The past may feed the future vocabulary (Validity
+is a past concept); the present composes both.
 """
 
 from __future__ import annotations
 
-import json
 import uuid
-from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
-from enum import Enum, StrEnum
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import StrEnum
 from typing import Any
 
-# --------------------------------------------------------------------------
-# Time
-# --------------------------------------------------------------------------
-
-def now() -> str:
-    """Canonical timestamp. UTC, ISO 8601, second resolution is not enough
-    for ordering so we keep microseconds. Never used for cross-source
-    ordering -- see Substrate.process for the ordering rule."""
-    return datetime.now(UTC).isoformat()
-
-
-def parse(ts: str) -> datetime:
-    return datetime.fromisoformat(ts)
-
+from ..past.events import Validity
+from ..time import now
 
 # --------------------------------------------------------------------------
 # Enumerations
 #
 # Several of these carry exactly one legal value in V0.0. The field exists
 # because it is expensive to retrofit; the value set stays at one until a
-# version actually exercises the alternatives. A field with one legal value
-# costs a byte and locks in nothing.
+# version actually exercises the alternatives.
 # --------------------------------------------------------------------------
 
 class WorldRefCapability(StrEnum):
@@ -55,19 +42,9 @@ class EmissionSemantics(StrEnum):
     SPORADIC = "SPORADIC"        # absence carries no information, ever
 
 
-class Validity(StrEnum):
-    """Exogenous does not mean correct. A runner can malfunction."""
-    VALID = "VALID"
-    DEGRADED = "DEGRADED"
-    INVALID = "INVALID"
-
-
 class Exposure(StrEnum):
     """Was the forecast visible, before resolution, to any actor capable of
-    moving its target observable?
-
-    Intervention is only knowable if someone reports it. Exposure is knowable
-    at authoring time and requires no reporting. EXPOSED outcomes are never
+    moving its target observable? EXPOSED outcomes are never
     calibration-eligible."""
     BLIND = "BLIND"
     EXPOSED = "EXPOSED"
@@ -88,33 +65,6 @@ class Comparator(StrEnum):
     GTE = "GTE"
     LT = "LT"
     LTE = "LTE"
-
-
-class Terminal(StrEnum):
-    RESOLVED = "RESOLVED"
-    INVALIDATED = "INVALIDATED"
-    INTERVENED = "INTERVENED"
-    UNRESOLVABLE = "UNRESOLVABLE"
-
-
-class Verdict(StrEnum):
-    """Only meaningful when terminal == RESOLVED."""
-    HIT = "HIT"
-    MISS = "MISS"
-
-
-_COMPARATORS = {
-    Comparator.EQ:  lambda a, b: a == b,
-    Comparator.NE:  lambda a, b: a != b,
-    Comparator.GT:  lambda a, b: a > b,
-    Comparator.GTE: lambda a, b: a >= b,
-    Comparator.LT:  lambda a, b: a < b,
-    Comparator.LTE: lambda a, b: a <= b,
-}
-
-
-def compare(observed: Any, comparator: Comparator, threshold: Any) -> bool:
-    return _COMPARATORS[Comparator(comparator)](observed, threshold)
 
 
 # --------------------------------------------------------------------------
@@ -161,7 +111,7 @@ class ResolutionSpec:
 
 
 # --------------------------------------------------------------------------
-# Ledger records
+# The forecast
 # --------------------------------------------------------------------------
 
 @dataclass
@@ -183,73 +133,19 @@ class Forecast:
             raise ValueError("probability must be in [0, 1]")
         if self.world_ref_capability is not WorldRefCapability.NONE and not self.world_ref:
             raise ValueError("host declared world_ref capability but supplied none")
+        # A horizon must be parseable AND timezone-aware, or resolution would
+        # later compare it against aware arrival timestamps and crash. The
+        # gate is at authoring -- a malformed claim never reaches process().
+        try:
+            horizon = datetime.fromisoformat(self.resolution.horizon)
+        except ValueError:
+            raise ValueError("resolution.horizon must be an ISO 8601 timestamp") from None
+        if horizon.tzinfo is None or horizon.utcoffset() is None:
+            raise ValueError("resolution.horizon must be timezone-aware")
 
     @property
     def hindsight_unprotected(self) -> bool:
         return self.world_ref_capability is WorldRefCapability.NONE
-
-
-@dataclass
-class ObservationEvent:
-    source_ref: str
-    event_id: str
-    subject_ref: str
-    observable: str
-    value: Any
-    source_seq: int | None = None
-    epoch_ref: str | None = None
-    emitted_at: str | None = None
-    validity: Validity = Validity.VALID
-    metadata: dict = field(default_factory=dict)
-    arrived_at: str = field(default_factory=now)
-
-    @property
-    def dedup_key(self) -> tuple:
-        """Uniqueness only ever holds within an emitter's own scope. That is
-        the only guarantee a distributed capture layer can actually make."""
-        return (self.source_ref, self.event_id)
-
-
-@dataclass
-class CompletenessSeal:
-    """Asserted at a natural boundary by the host: 'this stream is finished,
-    and it emitted exactly this many records.' Without a seal the substrate
-    cannot distinguish 'did not happen' from 'channel died', and must fail
-    closed."""
-    source_ref: str
-    epoch_ref: str
-    final_source_seq: int
-    complete: bool = True
-    sealed_at: str = field(default_factory=now)
-
-
-@dataclass
-class Outcome:
-    forecast_id: str
-    terminal: Terminal
-    verdict: Verdict | None = None
-    observation_key: tuple | None = None
-    predicted: float | None = None
-    observed: Any = None
-    brier: float | None = None
-    reason: str = ""
-    calibration_eligible: bool = False
-    outcome_id: str = field(default_factory=lambda: f"o_{uuid.uuid4().hex[:12]}")
-    resolved_at: str = field(default_factory=now)
-
-
-# --------------------------------------------------------------------------
-# (de)serialization
-# --------------------------------------------------------------------------
-
-def to_json(obj: Any) -> str:
-    def enc(o):
-        if isinstance(o, Enum):
-            return o.value
-        if isinstance(o, tuple):
-            return list(o)
-        raise TypeError(type(o))
-    return json.dumps(asdict(obj), default=enc, sort_keys=True)
 
 
 def forecast_from_dict(d: dict) -> Forecast:
@@ -264,23 +160,3 @@ def forecast_from_dict(d: dict) -> Forecast:
     d["world_ref_capability"] = WorldRefCapability(d["world_ref_capability"])
     d["assumptions"] = tuple(d.get("assumptions", ()))
     return Forecast(**d)
-
-
-def observation_from_dict(d: dict) -> ObservationEvent:
-    d = dict(d)
-    d["validity"] = Validity(d["validity"])
-    return ObservationEvent(**d)
-
-
-def seal_from_dict(d: dict) -> CompletenessSeal:
-    return CompletenessSeal(**d)
-
-
-def outcome_from_dict(d: dict) -> Outcome:
-    d = dict(d)
-    d["terminal"] = Terminal(d["terminal"])
-    if d.get("verdict"):
-        d["verdict"] = Verdict(d["verdict"])
-    if d.get("observation_key"):
-        d["observation_key"] = tuple(d["observation_key"])
-    return Outcome(**d)

@@ -5,7 +5,8 @@
 
 ## Boot
 
-1. Read `program.md`. Read `HARNESS.md`. Read the tail of the journal.
+1. Read `program.md`. Read `HARNESS.md`. Read `harness/digest.md` (the last
+   interpretation of state; check its state field). Read the tail of the journal.
 2. Boot the substrate root at `harness/root/` (until host #2 lands, the journal
    is plain JSONL under `harness/journal/` — same append-only rules).
 3. Reconstruct state: which work items are open, which gates are unmet.
@@ -41,9 +42,12 @@
 - Never weaken a gate to ship. That is laundering. The adjudicator catches it.
 - A flight ends when all its gates are green or its items are UNRESOLVABLE
   with reasons. Report to the human before the next flight starts.
-- Stop when the journal has no open items. Write `digest.md`:
-  what landed, what was discarded and why, what the substrate's own numbers
-  say about the team, and the sea-level teach-down for the human.
+- At every flight boundary, write a `harness/digest.md` CHECKPOINT: what
+  landed since the last one, what was discarded and why, the substrate's own
+  numbers on the team, the next thread.
+- Stop when the journal has no open items. Rewrite `harness/digest.md` as
+  FINAL per the digest spec (`harness/digest.md`): the wake test must pass —
+  a cold agent reads it and can state, verify, and continue.
 
 ## Failure modes
 

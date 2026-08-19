@@ -23,17 +23,30 @@ exist, not whether anything is good.
 
 ```
 hanish/
-  core/            domain-blind. imports stdlib and itself. nothing more.
-    types.py       four identities, enums, frozen dataclasses
-    ledger.py      append-only JSONL, fsync per record
-    substrate.py   index, resolution, expiry sweep, health
+  time.py         now/parse. the only clock.
+  past/           the ledgers: append-only JSONL, fsync per record.
+                    events.py    the vocab that happened
+                    ledger.py    repair() at open; raw() replay, never re-counts
+  future/         pure declaration, no I/O.
+    claims.py     forecasts, observables, resolution specs
+    scoring.py    compare, brier
+  present/        the substrate — composes past and future.
+    substrate.py  index, resolution, expiry sweep, health
   adapters/
-    ci.py          the ONLY file that knows what a commit is
+    ci.py         the ONLY file that knows what a commit is
 tests/
-  test_v00.py               one test per frozen guarantee
-  test_domain_blindness.py  dependency direction + vocabulary grep
+  test_v00.py               one test per frozen guarantee (all 20 still green)
+  test_domain_blindness.py  lattice direction + vocabulary grep
+  test_outward / tail / concurrency / schema   G1–G4
 demo.py
 ```
+
+The core is a lattice, oldest to newest, and no layer imports a higher one:
+
+    time ← past ← future ← present ← adapters
+
+The past can feed the future vocabulary; the present composes both; adapters
+translate. A lower layer never reaches up.
 
 ---
 

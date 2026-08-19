@@ -19,7 +19,7 @@ from pathlib import Path
 
 from hanish import Substrate
 from hanish.adapters.ci import REQUIRED_CHECKS_PASS, CIAdapter
-from hanish.core.types import (
+from hanish.future.claims import (
     Comparator,
     Exposure,
     Forecast,

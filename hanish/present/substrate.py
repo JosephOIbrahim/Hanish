@@ -1,15 +1,14 @@
-"""The substrate.
+"""The PRESENT. The substrate.
 
-A type system for time plus a scoreboard. It knows there are named
-observables, claims about them, an append-only evidence history, and
-outcomes. It knows nothing else -- not what any name means, not what units
-anything is in, not what actions exist, not whether anything is good.
+It knows there are named observables, claims about them, an append-only
+evidence history, and outcomes. It knows nothing else -- not what any name
+means, not what units anything is in, not what actions exist, not whether
+anything is good.
 
 Two failure directions, and they point opposite ways:
 
     OUTWARD   the substrate may never raise into its host.
               Losing an observation is acceptable. Breaking a build is not.
-
     INWARD    incomplete evidence may never become knowledge.
               A missing observation is UNRESOLVABLE, never MISS.
 
@@ -21,30 +20,30 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .ledger import Ledger
-from .types import (
+from ..future.claims import (
     Adjudication,
-    CompletenessSeal,
     Exposure,
     Forecast,
     ObservableSpec,
+    forecast_from_dict,
+)
+from ..future.scoring import brier, compare
+from ..past.events import (
+    CompletenessSeal,
     ObservationEvent,
     Outcome,
     Terminal,
     Verdict,
-    compare,
-    forecast_from_dict,
-    now,
     observation_from_dict,
     outcome_from_dict,
-    parse,
     seal_from_dict,
-    to_json,
 )
+from ..past.ledger import LEDGER_SCHEMA, Ledger, to_json
+from ..time import now, parse
 
 
 class Substrate:
-    """Single-process, file-backed. Everything is derived from the three
+    """File-backed, derived state. Everything is derived from the three
     ledgers, so restart is free: reopen and rebuild."""
 
     def __init__(self, root: str | Path, observables: dict[str, ObservableSpec] | None = None):
@@ -66,16 +65,25 @@ class Substrate:
         # Capture health. Not epistemic -- operational.
         self.dropped = 0
         self.duplicates = 0
+        self.invalid_compare = 0
+        self.process_errors = 0
+        self._invalid: set[tuple] = set()            # (obs_key, forecast_id)
 
         self._rebuild()
 
-    # -- rebuild ---------------------------------------------------------
+    # -- rebuild ------------------------------------------------------------
 
     def _rebuild(self) -> None:
         for f in self.forecasts_l.read(forecast_from_dict):
             self._register(f)
         for rec in self.evidence_l.raw():
             kind = rec.pop("_kind")
+            version = rec.pop("_v", 1)
+            if version > LEDGER_SCHEMA:
+                raise ValueError(
+                    f"evidence written by schema v{version}; this reader "
+                    f"understands up to v{LEDGER_SCHEMA}"
+                )
             if kind == "observation":
                 obs = observation_from_dict(rec)
                 self._seen.add(obs.dedup_key)
@@ -91,12 +99,12 @@ class Substrate:
         key = (f.subject_ref, f.resolution.observable)
         self.index.setdefault(key, []).append(f.forecast_id)
 
-    # -- declaration -----------------------------------------------------
+    # -- declaration ----------------------------------------------------------
 
     def declare(self, spec: ObservableSpec) -> None:
         self.observables[spec.name] = spec
 
-    # -- authoring -------------------------------------------------------
+    # -- authoring ------------------------------------------------------------
 
     def author(self, forecast: Forecast) -> str:
         """Well-formedness gate. A forecast whose condition names an
@@ -116,14 +124,19 @@ class Substrate:
         self._register(forecast)
         return forecast.forecast_id
 
-    # -- capture (host path) ---------------------------------------------
+    # -- capture (host path) --------------------------------------------------
 
     def capture(self, event: ObservationEvent | CompletenessSeal) -> bool:
         """Called from the host's own path. MUST NOT RAISE.
 
         Returns True if the record was durably accepted. A False here means
         the substrate lost something and knows it -- which is the only
-        acceptable kind of loss."""
+        acceptable kind of loss.
+
+        Cross-process once-only: when the in-memory dedup set misses (a fresh
+        process racing with another), the decision is made under the append
+        lock against the file, so two hosts capturing the same envelope
+        cannot both win."""
         try:
             if isinstance(event, ObservationEvent):
                 if event.observable not in self.observables:
@@ -132,9 +145,15 @@ class Substrate:
                 if event.dedup_key in self._seen:
                     self.duplicates += 1
                     return True          # at-least-once transport, effect-once ingest
-                self.evidence_l.append_dict(_tag(event, "observation"))
-                self._seen.add(event.dedup_key)
-                self._observations.append(event)
+                if self.evidence_l.append_observation_once(
+                        _tag(event, "observation"), event.dedup_key):
+                    self._seen.add(event.dedup_key)
+                    self._observations.append(event)
+                else:
+                    # A racing host already persisted this envelope. Accepted,
+                    # not re-ingested -- and remembered so it stays cheap.
+                    self.duplicates += 1
+                    self._seen.add(event.dedup_key)
                 return True
             elif isinstance(event, CompletenessSeal):
                 self.evidence_l.append_dict(_tag(event, "seal"))
@@ -146,17 +165,23 @@ class Substrate:
             self.dropped += 1
             return False
 
-    # -- resolution ------------------------------------------------------
+    # -- resolution ------------------------------------------------------------
 
     def process(self, at: str | None = None) -> list[Outcome]:
         """Drain evidence against the index, then sweep expiry.
 
         Called at explicit boundaries -- query, flush, a host finalizer.
-        Nothing in the system requires a process to be running."""
+        Nothing in the system requires a process to be running.
+
+        Guaranteed not to raise. An internal defect is counted in
+        process_errors and surfaced by status(), never thrown at the host."""
         at = at or now()
         produced: list[Outcome] = []
-        produced += self._resolve_from_evidence()
-        produced += self._sweep_expired(at)
+        try:
+            produced += self._resolve_from_evidence()
+            produced += self._sweep_expired(at)
+        except Exception:                 # noqa: BLE001 -- OUTWARD law
+            self.process_errors += 1
         return produced
 
     def _resolve_from_evidence(self) -> list[Outcome]:
@@ -172,7 +197,15 @@ class Substrate:
                 if parse(obs.arrived_at) > parse(f.resolution.horizon):
                     continue                            # arrived after horizon
                 assert f.resolution.adjudication is Adjudication.FIRST_VALID_TERMINAL
-                produced.append(self._score(f, obs))
+                try:
+                    produced.append(self._score(f, obs))
+                except (TypeError, ValueError):
+                    # An incomparable value is not evidence. Fail closed: a
+                    # malformed observation must never become a HIT or a
+                    # MISS. The forecast stays open; the attempt is counted.
+                    if (obs.dedup_key, fid) not in self._invalid:
+                        self._invalid.add((obs.dedup_key, fid))
+                        self.invalid_compare += 1
         return produced
 
     def _score(self, f: Forecast, obs: ObservationEvent) -> Outcome:
@@ -185,7 +218,7 @@ class Substrate:
             observation_key=obs.dedup_key,
             predicted=f.probability,
             observed=obs.value,
-            brier=(f.probability - y) ** 2,
+            brier=brier(f.probability, y),
             reason="first valid terminal observation",
             # An EXPOSED forecast was visible to something that could move
             # its target. It may be interesting. It is not calibration data.
@@ -196,7 +229,7 @@ class Substrate:
     def _sweep_expired(self, at: str) -> list[Outcome]:
         """Housekeeping, not the epistemic path. May lag arbitrarily and can
         never change an outcome already recorded."""
-        produced = []
+        produced: list[Outcome] = []
         for fid, f in self.forecasts.items():
             if fid in self.outcomes:
                 continue
@@ -209,14 +242,13 @@ class Substrate:
             if spec and spec.absence_is_informative() and complete:
                 # The channel promised a value, the channel is sealed, and
                 # nothing matching arrived. Absence is now evidence.
-                y = 0.0
                 produced.append(self._emit(Outcome(
                     forecast_id=fid,
                     terminal=Terminal.RESOLVED,
                     verdict=Verdict.MISS,
                     predicted=f.probability,
                     observed=None,
-                    brier=(f.probability - y) ** 2,
+                    brier=brier(f.probability, 0.0),
                     reason="horizon passed; stream sealed complete; no matching observation",
                     calibration_eligible=(f.exposure is Exposure.BLIND),
                 )))
@@ -261,7 +293,7 @@ class Substrate:
         self.outcomes[outcome.forecast_id] = outcome
         return outcome
 
-    # -- health ----------------------------------------------------------
+    # -- health -------------------------------------------------------------
 
     def status(self, at: str | None = None) -> dict:
         """Three numbers that matter, then drill-down.
@@ -288,6 +320,18 @@ class Substrate:
                 "dropped": self.dropped,
                 "drop_rate": _rate(self.dropped, captured),
                 "sealed_epochs": len(self._seals),
+                "invalid_compare": self.invalid_compare,
+                "process_errors": self.process_errors,
+                "tail_loss": (
+                    self.forecasts_l.tail_loss
+                    + self.evidence_l.tail_loss
+                    + self.outcomes_l.tail_loss
+                ),
+                "corrupted": (
+                    self.forecasts_l.corrupted
+                    + self.evidence_l.corrupted
+                    + self.outcomes_l.corrupted
+                ),
             },
             "forecasts": {
                 "total": len(self.forecasts),
@@ -309,6 +353,7 @@ def _tag(record, kind: str) -> dict:
     """Evidence ledger holds two record types; tag them on the way in."""
     payload = json.loads(to_json(record))
     payload["_kind"] = kind
+    payload["_v"] = LEDGER_SCHEMA
     return payload
 
 

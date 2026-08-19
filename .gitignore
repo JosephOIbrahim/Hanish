@@ -14,3 +14,6 @@ venv/
 # Editors
 .idea/
 .vscode/
+
+# Harness runtime ledgers
+harness/root/

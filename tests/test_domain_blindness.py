@@ -7,6 +7,9 @@ Two independent defences, because they catch different failures:
                              into identifiers and docstrings, which import
                              rules never see.
 
+The core is a lattice -- time ← past ← future ← present -- and no layer may
+import from a higher one; the checks below walk all of it except adapters.
+
 The grep is not architecture. Do not mistake it for architecture.
 """
 
@@ -16,7 +19,8 @@ import ast
 import re
 from pathlib import Path
 
-CORE = Path(__file__).resolve().parents[1] / "hanish" / "core"
+ROOT = Path(__file__).resolve().parents[1] / "hanish"
+LAYERS = ("time.py", "past", "future", "present")
 
 # Nouns from every host we have or plan. If one of these appears in core,
 # the substrate has quietly become a tool for one application.
@@ -28,7 +32,12 @@ DOMAIN_NOUNS = [
 
 
 def _core_files():
-    return [p for p in CORE.glob("*.py") if p.name != "__init__.py"]
+    files = [ROOT / "time.py"]
+    for layer in LAYERS[1:]:
+        files.extend(
+            p for p in (ROOT / layer).glob("*.py") if p.name != "__init__.py"
+        )
+    return files
 
 
 def test_core_imports_no_adapter():
@@ -46,11 +55,12 @@ def test_core_imports_no_adapter():
 
 
 def test_core_has_no_third_party_dependencies():
-    """The core depends on the standard library, its own types, and nothing
+    """The core depends on the standard library, its own layers, and nothing
     else. A substrate with a dependency tree is a substrate that rots."""
     stdlib_ok = {
         "json", "os", "uuid", "hashlib", "dataclasses", "datetime", "enum",
         "typing", "pathlib", "__future__", "collections", "itertools",
+        "msvcrt", "fcntl", "time", "contextlib",
     }
     for path in _core_files():
         tree = ast.parse(path.read_text())
@@ -62,6 +72,25 @@ def test_core_has_no_third_party_dependencies():
                 if node.level == 0 and node.module:
                     root = node.module.split(".")[0]
                     assert root in stdlib_ok, f"{path.name}: {node.module}"
+
+
+def test_lattice_flows_forward():
+    """The lattice is time ← past ← future ← present, and it is load-bearing:
+    no layer imports from a higher one. An upward edge is a law drift."""
+    rank = {"past": 1, "future": 2, "present": 3}
+    for path in _core_files():
+        my_rank = rank.get(path.parent.name, 0)
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            if node.level == 0 or node.module is None:
+                continue
+            top = node.module.split(".")[0]
+            if top in rank and rank[top] > my_rank:
+                raise AssertionError(
+                    f"{path.name} walks ..{node.module} (upward edge)"
+                )
 
 
 def _executable_source(path: Path) -> str:

@@ -24,7 +24,7 @@ ceiling, not the concurrency.
 | guardian | cross | attacks every claim | the adversary | every wave |
 | verifier | cross | gates from metrics.md | metrics true | every wave |
 | critic | cross | the law | the constitution | before every KEEP |
-| docs-writer | cross | ADRs/README/digest | teach-down | flight SHIP |
+| docs-writer | cross | ADRs/README/digest (spec: harness/digest.md) | teach-down | flight SHIP |
 | release-ship | cross | CI/PyPI/.gitignore | G9 | flight SHIP |
 
 **Single-file rule:** a worker touches only the file it owns. Anything else is

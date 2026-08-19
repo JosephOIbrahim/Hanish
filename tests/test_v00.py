@@ -11,15 +11,17 @@ import pytest
 
 from hanish import Substrate
 from hanish.adapters.ci import REQUIRED_CHECKS_PASS, CIAdapter
-from hanish.core.types import (
+from hanish.future.claims import (
     Comparator,
     Exposure,
     Forecast,
-    ObservationEvent,
     ResolutionSpec,
+    WorldRefCapability,
+)
+from hanish.past.events import (
+    ObservationEvent,
     Terminal,
     Verdict,
-    WorldRefCapability,
 )
 
 SHA = "abc123"

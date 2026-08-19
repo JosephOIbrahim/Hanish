@@ -15,13 +15,15 @@ from __future__ import annotations
 
 import hashlib
 
-from ..core.types import (
-    CompletenessSeal,
+from ..future.claims import (
     EmissionSemantics,
     ObservableSpec,
+    WorldRefCapability,
+)
+from ..past.events import (
+    CompletenessSeal,
     ObservationEvent,
     Validity,
-    WorldRefCapability,
 )
 
 SOURCE = "github-actions"
