@@ -3,6 +3,54 @@
 All notable changes to Hanish. Append-only, like the ledgers: a correction is
 a new entry, never an edit to an old one.
 
+## 0.1.2 — the waves
+
+Two harness wave records land. No package change: `hanish/` is untouched and
+the 41 tests are exactly what 0.1.1 shipped. What grew is the evidence layer —
+the harness pointed at other repos, and at the external verdict, and both times
+it found the system's own docs were less honest than the system's claims.
+
+### The memory wave — `harness/waves/memory-scan.md` (commit `ae42274`)
+
+The first wave aimed at the fleet: SYNAPSE, Moneta, Octavius, Harlo, SALUS,
+cognitive-substrate. Six scouted, six adversarially challenged, **eight
+mechanisms survived** into a scaffold. The deepest is the hash-chain root
+commitment — a same-length byte flip that still parses as JSON is read as truth
+today, the third damage class the ledger cannot see. It sequences behind a
+seed-variance determinism gate (`tests/test_replay_determinism.py`), which
+converts "deterministic replay" from assertion into proof and becomes the guard
+every later change ships behind. The wave recorded its own damage with the same
+honesty: run 1 lost five challenges plus the plan to an API 429 and was resumed
+13/13; a classifier warning on the SYNAPSE scout was re-checked and the
+surviving transfers re-verified per-file.
+
+### The v7 adjudication — `harness/waves/verdict-adjudication.md` +
+`adjudication-wave.js` (commit `2cec768`)
+
+An external evaluator scored HANISH 8.5/10 on the V0.0–V0.1 foundation and
+~3/10 on the full v7 program. The wave neither defended the repo nor accepted
+the verdict — it adjudicated: 9 agents (4 scouts, 4 challengers, 1
+synthesizer), every claim checked against the code with file:line, **9 of 12
+survived**. The strongest findings were the ones the verdict missed:
+
+- **The docs asserted a proof that never happened.** HARNESS.md and the digest
+  both claim a CI result was captured; the evidence record carries a fabricated
+  `run_id` ("flight-past"). Absence laundered into an assertion, by the
+  system's own documentation.
+- **The first self-forecast is not BLIND.** The instrument's only calibration
+  sample was authored by the identity that directed the flight — and is already
+  scored calibration-eligible HIT. Exposure integrity is a live defect, not a
+  policy question.
+
+Build order: **R2** (doc-honesty) and **R3** (exposure amendment) land **NOW**;
+**R4–R8** (committed receipts, cold-capture watermark, the L7 hazard folded
+into P6, WorldManifest-or-downgrade, the merged CI-host item with sequence
+authority) land **NEXT**; all behind the determinism gate. The triad stays
+deliberately not next until the instrument is trustworthy.
+
+This entry exists because a landing without a changelog line is a landing that
+did not happen. The waves landed; this is the formal record.
+
 ## 0.1.1 — the guardian verdict
 
 The guardian attacked the v0.1.0 diff and found the laws were broken. Three
