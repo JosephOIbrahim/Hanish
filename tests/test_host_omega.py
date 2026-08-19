@@ -32,52 +32,76 @@ class ContractHost:
 
 def _omega_host() -> ContractHost:
     adapter = OmegaAdapter("contract")
+
+    def make_event(value=True, event_id="event-1", source_seq=1, arrived_at=ARRIVED):
+        return adapter.event(
+            subject_ref=SUBJECT,
+            epoch_ref=EPOCH,
+            event_id=event_id,
+            value=value,
+            source_seq=source_seq,
+            arrived_at=arrived_at,
+        )
+
+    def make_seal(
+        final_source_seq=1,
+        complete=True,
+        sealed_at="2026-01-01T02:01:00+00:00",
+    ):
+        return adapter.seal(
+            subject_ref=SUBJECT,
+            epoch_ref=EPOCH,
+            final_source_seq=final_source_seq,
+            complete=complete,
+            sealed_at=sealed_at,
+        )
+
     return ContractHost(
         name="omega",
         source_ref=adapter.source_ref,
         observable=OMEGA_RESULT,
         specs=adapter.observable_specs(),
-        event=lambda value=True: adapter.event(
-            subject_ref=SUBJECT,
-            epoch_ref=EPOCH,
-            event_id="event-1",
-            value=value,
-            source_seq=1,
-            arrived_at=ARRIVED,
-        ),
-        seal=lambda: adapter.seal(
-            subject_ref=SUBJECT,
-            epoch_ref=EPOCH,
-            final_source_seq=1,
-            sealed_at="2026-01-01T02:01:00+00:00",
-        ),
+        event=make_event,
+        seal=make_seal,
     )
 
 
 def _ci_host() -> ContractHost:
     adapter = CIAdapter(source_ref="github-actions:fixture/contract")
+
+    def make_event(value=True, event_id="event-1", source_seq=1, arrived_at=ARRIVED):
+        return ObservationEvent(
+            source_ref=adapter.source_ref,
+            event_id=event_id,
+            subject_ref=SUBJECT,
+            observable=REQUIRED_CHECKS_PASS,
+            value=value,
+            source_seq=source_seq,
+            epoch_ref=EPOCH,
+            arrived_at=arrived_at,
+        )
+
+    def make_seal(
+        final_source_seq=1,
+        complete=True,
+        sealed_at="2026-01-01T02:01:00+00:00",
+    ):
+        return CompletenessSeal(
+            source_ref=adapter.source_ref,
+            epoch_ref=EPOCH,
+            subject_ref=SUBJECT,
+            final_source_seq=final_source_seq,
+            complete=complete,
+            sealed_at=sealed_at,
+        )
+
     return ContractHost(
         name="ci",
         source_ref=adapter.source_ref,
         observable=REQUIRED_CHECKS_PASS,
         specs=adapter.observable_specs(),
-        event=lambda value=True: ObservationEvent(
-            source_ref=adapter.source_ref,
-            event_id="run-1:attempt-1:required_checks",
-            subject_ref=SUBJECT,
-            observable=REQUIRED_CHECKS_PASS,
-            value=value,
-            source_seq=1,
-            epoch_ref=EPOCH,
-            arrived_at=ARRIVED,
-        ),
-        seal=lambda: CompletenessSeal(
-            source_ref=adapter.source_ref,
-            epoch_ref=EPOCH,
-            subject_ref=SUBJECT,
-            final_source_seq=1,
-            sealed_at="2026-01-01T02:01:00+00:00",
-        ),
+        event=make_event,
+        seal=make_seal,
     )
 
 
@@ -145,6 +169,58 @@ def test_contract_malformed_time_is_dropped_and_good_retry_still_scores(host, tm
     assert not substrate.capture(malformed)
     assert substrate.capture(host.event())
     assert substrate.process(at=AFTER)[0].terminal is Terminal.RESOLVED
+
+
+def test_contract_gap_defeats_a_complete_seal_across_restart(host, tmp_path):
+    substrate = Substrate(tmp_path, observables=host.specs)
+    forecast_id = substrate.author(_forecast(host))
+    assert substrate.capture(
+        host.event(
+            event_id="event-2",
+            source_seq=2,
+            arrived_at="2026-01-01T02:30:00+00:00",
+        )
+    )
+    assert substrate.capture(host.seal(final_source_seq=2))
+    assert substrate.process(at=AFTER)[0].terminal is Terminal.UNRESOLVABLE
+
+    reopened = Substrate(tmp_path, observables=host.specs)
+    assert reopened.outcomes[forecast_id].terminal is Terminal.UNRESOLVABLE
+    assert reopened.process(at=AFTER) == []
+
+
+def test_contract_provisional_outcome_settles_once_after_late_complete_seal(host, tmp_path):
+    substrate = Substrate(tmp_path, observables=host.specs)
+    forecast_id = substrate.author(_forecast(host))
+    assert substrate.process(at=AFTER)[0].terminal is Terminal.UNRESOLVABLE
+    assert substrate.process(at=AFTER) == []
+
+    assert substrate.capture(host.seal(final_source_seq=0))
+    settled = substrate.process(at=AFTER)
+    assert settled[0].verdict is Verdict.MISS
+    assert substrate.process(at=AFTER) == []
+
+    reopened = Substrate(tmp_path, observables=host.specs)
+    assert reopened.outcomes[forecast_id].verdict is Verdict.MISS
+    assert len(list(reopened.outcomes_l.raw())) == 2
+
+
+def test_contract_conflicting_seal_cannot_upgrade_after_restart(host, tmp_path):
+    substrate = Substrate(tmp_path, observables=host.specs)
+    forecast_id = substrate.author(_forecast(host))
+    assert substrate.capture(host.seal(final_source_seq=0, complete=False))
+    assert not substrate.capture(
+        host.seal(
+            final_source_seq=0,
+            complete=True,
+            sealed_at="2026-01-01T02:02:00+00:00",
+        )
+    )
+
+    reopened = Substrate(tmp_path, observables=host.specs)
+    reopened.process(at=AFTER)
+    assert reopened.outcomes[forecast_id].terminal is Terminal.UNRESOLVABLE
+    assert len(reopened._seals) == 1
 
 
 def test_two_host_namespaces_cannot_silently_overwrite_each_other(tmp_path):

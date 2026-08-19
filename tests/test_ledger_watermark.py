@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 from hanish.past.ledger import Ledger
 
@@ -52,9 +53,55 @@ def test_tail_sync_repairs_a_post_open_torn_write(tmp_path):
     with open(path, "ab") as fh:
         fh.write(json.dumps(good, sort_keys=True).encode() + b"\n{\"torn\"")
 
-    assert ledger.synchronize() == (good,)
+    synchronized = ledger.synchronize()
+    assert synchronized.records == (good,)
+    assert not synchronized.reset
     assert ledger.tail_loss == 1
     assert path.read_bytes().endswith(b"\n")
+
+
+def test_tail_sync_rejects_complete_non_objects_and_counts_blank_records(tmp_path):
+    path = tmp_path / "evidence.jsonl"
+    ledger = Ledger(path)
+    good = _observation("event-1")
+    with open(path, "ab") as fh:
+        fh.write(b"[]\n   \n")
+        fh.write(json.dumps(good, sort_keys=True).encode() + b"\n")
+
+    synchronized = ledger.synchronize()
+    assert synchronized.records == (good,)
+    assert not synchronized.reset
+    assert ledger.corrupted == 2
+    assert ledger.tail_loss == 0
+    assert list(ledger.raw()) == [good]
+
+    next_record = _observation("event-2")
+    result = ledger.sync_observation_once(next_record, ("source", "event-2"))
+    assert result.appended
+    assert list(ledger.raw()) == [good, next_record]
+
+
+def test_same_length_in_place_rewrite_forces_a_visible_generation_reset(tmp_path):
+    path = tmp_path / "evidence.jsonl"
+    ledger = Ledger(path)
+    first = _observation("event-1")
+    second = _observation("event-2")
+    ledger.append_dict(first)
+    original = path.stat()
+    replacement = (json.dumps(second, allow_nan=False, sort_keys=True) + "\n").encode()
+    assert len(replacement) == original.st_size
+
+    path.write_bytes(replacement)
+    os.utime(
+        path,
+        ns=(original.st_atime_ns, original.st_mtime_ns + 1_000_000_000),
+    )
+    synchronized = ledger.synchronize()
+
+    assert synchronized.reset
+    assert synchronized.records == (second,)
+    assert ledger.generation_resets == 1
+    assert ledger.snapshot() == (second,)
 
 
 def test_tail_sync_does_not_repeat_the_cold_rescan(tmp_path, monkeypatch):

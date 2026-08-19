@@ -125,6 +125,30 @@ def test_semantically_broken_record_never_bricks_reopen(tmp_path):
     assert out[0].verdict is Verdict.HIT
 
 
+@pytest.mark.parametrize(
+    ("ledger_name", "record"),
+    [
+        ("forecasts", "[]"),
+        ("evidence", "null"),
+        ("outcomes", '"not-an-object"'),
+    ],
+)
+def test_complete_json_non_object_is_counted_and_never_bricks_reopen(
+    tmp_path, ledger_name, record
+):
+    """A complete JSON value is a ledger record only when it is an object."""
+    path = tmp_path / f"{ledger_name}.jsonl"
+    path.write_text(record + "\n", encoding="utf-8")
+
+    ci = CIAdapter()
+    reopened = Substrate(tmp_path, observables=ci.observable_specs())
+    ledger = getattr(reopened, f"{ledger_name}_l")
+
+    assert ledger.corrupted == 1
+    assert list(ledger.raw()) == []
+    assert reopened.status()["capture"]["corrupted"] == 1
+
+
 # ---------------------------------------------------------------------------
 # P0-2 -- a poison record cannot deny resolution
 # ---------------------------------------------------------------------------
@@ -329,6 +353,17 @@ def test_whitespace_tail_is_a_torn_tail(tmp_path):
     assert ledger.tail_loss == 1
     assert len(ledger) == 1
     assert p.read_text(encoding="utf-8").strip() == '{"a":1}'
+
+
+def test_complete_interior_whitespace_is_counted_as_corruption(tmp_path):
+    p = tmp_path / "interior-blank.jsonl"
+    p.write_bytes(b'{"a": 1}\n   \n{"b": 2}\n')
+
+    ledger = Ledger(p)
+
+    assert ledger.tail_loss == 0
+    assert ledger.corrupted == 1
+    assert list(ledger.raw()) == [{"a": 1}, {"b": 2}]
 
 
 # ---------------------------------------------------------------------------

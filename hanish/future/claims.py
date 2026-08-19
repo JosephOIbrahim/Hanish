@@ -383,7 +383,12 @@ def validate_world_contract(forecast: Forecast, *, schema_version: int = 2) -> N
         raise ValueError("world commitment must be a JSON object")
     if canonical_world_commitment(payload) != commitment:
         raise ValueError("world commitment must use canonical JSON")
-    if payload.get("_kind") != "world_commitment" or payload.get("_v") != 1:
+    commitment_version = payload.get("_v")
+    if (
+        payload.get("_kind") != "world_commitment"
+        or type(commitment_version) is not int
+        or commitment_version != 1
+    ):
         raise ValueError("world commitment kind/version is invalid")
     if payload.get("capability") != capability.value:
         raise ValueError("world commitment capability does not match forecast")

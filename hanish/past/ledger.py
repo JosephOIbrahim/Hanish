@@ -50,7 +50,21 @@ def to_json(obj: Any) -> str:
         if isinstance(o, tuple):
             return list(o)
         raise TypeError(type(o))
-    return json.dumps(asdict(obj), default=enc, sort_keys=True)
+    return json.dumps(asdict(obj), allow_nan=False, default=enc, sort_keys=True)
+
+
+@dataclass(frozen=True)
+class LedgerSyncResult:
+    """Immutable result of synchronizing one ledger generation.
+
+    ``reset`` is true when the file identity, length, or record boundary no
+    longer matched the caller's watermark and ``records`` is therefore the
+    complete replacement snapshot.  Otherwise ``records`` is only the newly
+    appended tail.
+    """
+
+    records: tuple[dict, ...]
+    reset: bool = False
 
 
 @dataclass(frozen=True)
@@ -67,6 +81,7 @@ class AtomicAppendResult:
     records: tuple[dict, ...]
     winner: dict | None = None
     conflict: bool = False
+    reset: bool = False
 
 
 class _lock:
@@ -116,10 +131,13 @@ class Ledger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.touch(exist_ok=True)
         self.tail_loss = 0
-        self.corrupted = 0
+        self._physical_corrupted = 0
+        self._semantic_corrupted = 0
+        self.generation_resets = 0
         self._records: list[dict] = []
         self._watermark = 0
         self._file_identity: tuple[int, int] | None = None
+        self._file_mtime_ns: int | None = None
         self._unique_indexes: dict[tuple[str, ...], dict[tuple, dict]] = {}
         self._multi_indexes: dict[tuple[str, ...], dict[tuple, list[dict]]] = {}
 
@@ -129,6 +147,20 @@ class Ledger:
             self._full_rescan_locked()
 
     # -- appends ------------------------------------------------------------
+
+    @property
+    def corrupted(self) -> int:
+        return self._physical_corrupted + self._semantic_corrupted
+
+    def mark_semantic_corruption(self) -> None:
+        """Count one decoded record that violates the consumer schema."""
+
+        self._semantic_corrupted += 1
+
+    def reset_semantic_corruption(self) -> None:
+        """Prepare semantic damage accounting for a replacement snapshot."""
+
+        self._semantic_corrupted = 0
 
     def _write_durable(self, line: str) -> None:
         """fsync'd append, no locking. Call only under _lock."""
@@ -141,7 +173,12 @@ class Ledger:
 
     @staticmethod
     def _canonical_payload(payload: dict) -> str:
-        return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+        return json.dumps(
+            payload,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
 
     def _remember(self, record: dict) -> None:
         self._records.append(record)
@@ -156,15 +193,38 @@ class Ledger:
         stat = self.path.stat()
         return (stat.st_dev, stat.st_ino)
 
+    def _remember_file_metadata(self) -> None:
+        stat = self.path.stat()
+        self._file_identity = (stat.st_dev, stat.st_ino)
+        self._file_mtime_ns = stat.st_mtime_ns
+
     def _parse_complete_lines(self, data: bytes) -> list[dict]:
         records: list[dict] = []
-        for line in data.split(b"\n"):
+        lines = data.split(b"\n")
+        for index, line in enumerate(lines):
+            # A newline-terminated byte stream has one synthetic empty item
+            # after its final delimiter.  Every earlier blank/whitespace line
+            # is a complete but corrupt record and must remain visible in the
+            # damage accounting.
+            if index == len(lines) - 1 and line == b"":
+                continue
             if not line.strip():
+                self._physical_corrupted += 1
                 continue
             try:
-                records.append(json.loads(line.decode("utf-8", "strict").strip()))
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                self.corrupted += 1
+                decoded = json.loads(
+                    line.decode("utf-8", "strict").strip(),
+                    parse_constant=lambda value: (_ for _ in ()).throw(
+                        ValueError(f"non-finite JSON number {value}")
+                    ),
+                )
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                self._physical_corrupted += 1
+                continue
+            if not isinstance(decoded, dict):
+                self._physical_corrupted += 1
+                continue
+            records.append(decoded)
         return records
 
     def _full_rescan_locked(self) -> list[dict]:
@@ -179,27 +239,34 @@ class Ledger:
             data = data[:boundary]
             self.tail_loss += 1
 
+        self._physical_corrupted = 0
         records = self._parse_complete_lines(data)
         self._records = records
         self._count = len(records)
         self._watermark = len(data)
-        self._file_identity = self._identity()
+        self._remember_file_metadata()
         self._unique_indexes.clear()
         self._multi_indexes.clear()
         return list(records)
 
-    def _sync_tail_locked(self) -> list[dict]:
+    def _sync_tail_locked(self) -> LedgerSyncResult:
         """Read complete records since the local byte watermark.
 
         Replacement, truncation, or a watermark that is no longer on a line
         boundary triggers a safe full rescan. Ordinary cross-process appends
         stay proportional to the newly appended tail.
         """
-        size = self.path.stat().st_size
-        identity = self._identity()
+        stat = self.path.stat()
+        size = stat.st_size
+        identity = (stat.st_dev, stat.st_ino)
         invalid_watermark = (
             identity != self._file_identity
             or self._watermark > size
+            or (
+                size == self._watermark
+                and self._file_mtime_ns is not None
+                and stat.st_mtime_ns != self._file_mtime_ns
+            )
         )
         tail = b""
         if not invalid_watermark:
@@ -211,18 +278,19 @@ class Ledger:
                     fh.seek(self._watermark)
                     tail = fh.read()
         if invalid_watermark:
-            before = len(self._records)
+            self.generation_resets += 1
             records = self._full_rescan_locked()
-            return records if before else list(records)
+            return LedgerSyncResult(tuple(records), reset=True)
         if not tail:
-            return []
+            return LedgerSyncResult(())
 
         if not tail.endswith(b"\n"):
             relative_boundary = tail.rfind(b"\n") + 1
             boundary = self._watermark + relative_boundary
             if boundary < self._watermark:
+                self.generation_resets += 1
                 records = self._full_rescan_locked()
-                return list(records)
+                return LedgerSyncResult(tuple(records), reset=True)
             with open(self.path, "r+b") as fh:
                 fh.truncate(boundary)
             tail = tail[:relative_boundary]
@@ -234,19 +302,19 @@ class Ledger:
             self._remember(record)
         self._count += len(records)
         self._watermark = size
-        self._file_identity = self._identity()
-        return records
+        self._remember_file_metadata()
+        return LedgerSyncResult(tuple(records))
 
     def _append_payload_locked(self, payload: dict) -> int:
         # Preserve the human-readable on-disk v1 formatting. Canonical JSON
         # is used for identity comparisons, not to rewrite ledger history.
-        line = json.dumps(payload, sort_keys=True) + "\n"
+        line = json.dumps(payload, allow_nan=False, sort_keys=True) + "\n"
         offset = self._count
         self._write_durable(line)
         self._remember(payload)
         self._count += 1
         self._watermark += len(line.encode("utf-8"))
-        self._file_identity = self._identity()
+        self._remember_file_metadata()
         return offset
 
     def append(self, record: Any) -> int:
@@ -264,10 +332,20 @@ class Ledger:
             self._sync_tail_locked()
             return self._append_payload_locked(payload)
 
-    def synchronize(self) -> tuple[dict, ...]:
-        """Return records appended by other processes since the last sync."""
+    def synchronize(self) -> LedgerSyncResult:
+        """Return a tail delta or an explicit full-snapshot replacement."""
         with _lock(self.path):
-            return tuple(self._sync_tail_locked())
+            return self._sync_tail_locked()
+
+    def snapshot(self) -> tuple[dict, ...]:
+        """Return the current in-memory snapshot without another file read.
+
+        Callers synchronize first when they need to observe other writers.
+        The records are treated as immutable ledger values throughout the
+        core; the tuple prevents structural mutation of the snapshot itself.
+        """
+
+        return tuple(self._records)
 
     def append_unique(self, payload: dict, identity_fields: tuple[str, ...]) -> AtomicAppendResult:
         """Append once for a durable composite identity.
@@ -291,16 +369,18 @@ class Ledger:
                 conflict = self._canonical_payload(winner) != self._canonical_payload(payload)
                 return AtomicAppendResult(
                     appended=False,
-                    records=tuple(discovered),
+                    records=discovered.records,
                     winner=winner,
                     conflict=conflict,
+                    reset=discovered.reset,
                 )
 
             self._append_payload_locked(payload)
             return AtomicAppendResult(
                 appended=True,
-                records=tuple([*discovered, payload]),
+                records=tuple([*discovered.records, payload]),
                 winner=payload,
+                reset=discovered.reset,
             )
 
     def compare_and_append(
@@ -326,22 +406,25 @@ class Ledger:
                 if self._canonical_payload(record) == self._canonical_payload(payload):
                     return AtomicAppendResult(
                         appended=False,
-                        records=tuple(discovered),
+                        records=discovered.records,
                         winner=record,
+                        reset=discovered.reset,
                     )
             if not transition_allowed(existing, payload):
                 return AtomicAppendResult(
                     appended=False,
-                    records=tuple(discovered),
+                    records=discovered.records,
                     winner=existing[-1] if existing else None,
                     conflict=True,
+                    reset=discovered.reset,
                 )
 
             self._append_payload_locked(payload)
             return AtomicAppendResult(
                 appended=True,
-                records=tuple([*discovered, payload]),
+                records=tuple([*discovered.records, payload]),
                 winner=payload,
+                reset=discovered.reset,
             )
 
     def sync_observation_once(self, payload: dict, dedup_key: tuple) -> AtomicAppendResult:
@@ -396,8 +479,15 @@ class Ledger:
                 s = line.decode("utf-8", "strict").strip()
                 if not s:
                     continue
-                yield json.loads(s)
-            except (json.JSONDecodeError, UnicodeDecodeError):
+                record = json.loads(
+                    s,
+                    parse_constant=lambda value: (_ for _ in ()).throw(
+                        ValueError(f"non-finite JSON number {value}")
+                    ),
+                )
+                if isinstance(record, dict):
+                    yield record
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
                 continue
 
     def __len__(self) -> int:

@@ -306,6 +306,92 @@ def test_v2_envelopes_are_explicit_and_invalid_versions_fail_closed(tmp_path):
     assert forecast_id in reopened.forecasts
 
 
+def test_corrupt_outcome_cannot_launder_calibration_or_block_good_evidence(tmp_path):
+    substrate = Substrate(tmp_path, observables=specs())
+    forecast_id = substrate.author(forecast())
+    substrate.outcomes_l.append_dict(
+        {
+            "_kind": "outcome",
+            "_v": 2,
+            "brier": 0.0625,
+            "calibration_eligible": "yes",
+            "forecast_id": forecast_id,
+            "observation_key": [SOURCE, "poison"],
+            "observed": True,
+            "outcome_id": "o_poison",
+            "predicted": 0.75,
+            "reason": "malformed eligibility",
+            "resolved_at": ARRIVED,
+            "terminal": "RESOLVED",
+            "verdict": "HIT",
+        }
+    )
+
+    reopened = Substrate(tmp_path, observables=specs())
+    assert forecast_id not in reopened.outcomes
+    assert reopened.outcomes_l.corrupted == 1
+
+    outcome = resolve_true(reopened)
+    assert outcome.calibration_eligible is True
+    assert reopened.outcomes[forecast_id].outcome_id != "o_poison"
+
+
+@pytest.mark.parametrize("nonfinite", [float("nan"), float("inf"), float("-inf")])
+def test_nonfinite_float_thresholds_and_observations_fail_closed(tmp_path, nonfinite):
+    observable = "host.duration"
+    declarations = {
+        observable: ObservableSpec(
+            name=observable,
+            value_type="float",
+            emission=EmissionSemantics.TERMINAL,
+            sources=(SOURCE,),
+        )
+    }
+    substrate = Substrate(tmp_path, observables=declarations)
+    value = Forecast(
+        subject_ref="subject:float",
+        claim="duration stays finite",
+        probability=0.5,
+        exposure=Exposure.EXPOSED,
+        created_at=CREATED,
+        resolution=ResolutionSpec(
+            observable=observable,
+            comparator=Comparator.LTE,
+            threshold=nonfinite,
+            horizon=HORIZON,
+        ),
+    )
+    with pytest.raises(ValueError):
+        substrate.author(value)
+
+    finite = Forecast(
+        subject_ref="subject:float",
+        claim="duration stays finite",
+        probability=0.5,
+        exposure=Exposure.EXPOSED,
+        created_at=CREATED,
+        resolution=ResolutionSpec(
+            observable=observable,
+            comparator=Comparator.LTE,
+            threshold=1.0,
+            horizon=HORIZON,
+        ),
+    )
+    substrate.author(finite)
+    assert not substrate.capture(
+        ObservationEvent(
+            source_ref=SOURCE,
+            event_id="nonfinite",
+            subject_ref="subject:float",
+            observable=observable,
+            value=nonfinite,
+            arrived_at=ARRIVED,
+        )
+    )
+    assert substrate.dropped == 1
+    assert substrate.process(at=ARRIVED) == []
+
+
 def test_future_version_still_fails_loud(tmp_path):
     substrate = Substrate(tmp_path, observables=specs())
     substrate.forecasts_l.append_dict({"_kind": "forecast", "_v": 3})
@@ -392,6 +478,29 @@ def test_full_canonical_world_commitment_is_verified(tmp_path):
     )
     with pytest.raises(ValueError, match="does not match"):
         substrate.author(bad)
+
+    bool_version_commitment = canonical_world_commitment(
+        {
+            "_kind": "world_commitment",
+            "_v": True,
+            "artifacts": [],
+            "capability": "REPLAYABLE",
+        }
+    )
+    bool_version = Forecast(
+        subject_ref=value.subject_ref,
+        claim=value.claim,
+        probability=value.probability,
+        exposure=Exposure.EXPOSED,
+        world_ref=world_ref_for(bool_version_commitment),
+        world_ref_capability=WorldRefCapability.REPLAYABLE,
+        world_commitment=bool_version_commitment,
+        forecast_id="f_bool_world_version",
+        created_at=CREATED,
+        resolution=value.resolution,
+    )
+    with pytest.raises(ValueError, match="kind/version"):
+        substrate.author(bool_version)
 
 
 def test_new_manifestless_replayable_forecast_is_rejected(tmp_path):

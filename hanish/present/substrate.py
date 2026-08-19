@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import replace
 from pathlib import Path
 
@@ -43,7 +44,7 @@ from ..past.events import (
     outcome_from_dict,
     seal_from_dict,
 )
-from ..past.ledger import LEDGER_SCHEMA, Ledger, to_json
+from ..past.ledger import LEDGER_SCHEMA, AtomicAppendResult, Ledger, LedgerSyncResult, to_json
 from ..time import now, parse
 
 _SCHEMA_V2 = 2
@@ -111,6 +112,43 @@ class Substrate:
 
     # -- rebuild ------------------------------------------------------------
 
+    def _clear_derived_state(self) -> None:
+        """Discard every value derived from ledger contents.
+
+        Operational host counters such as drops and process errors survive a
+        storage-generation change.  Counters and cursors derived from durable
+        records are rebuilt with the replacement snapshot so removed history
+        cannot remain visible as a ghost.
+        """
+
+        self.forecasts.clear()
+        self.index.clear()
+        self.outcomes.clear()
+        self.amendments.clear()
+        self._forecast_versions.clear()
+        self._forecast_digests.clear()
+        self._base_exposure.clear()
+        self._effective_exposure.clear()
+        self._exposure_quarantined.clear()
+        self._seen.clear()
+        self._observations.clear()
+        self._observation_payloads.clear()
+        self._observations_by_key.clear()
+        self._sequence_values.clear()
+        self._sequence_invalid.clear()
+        self._seals.clear()
+        self._seal_payloads.clear()
+        self._seal_versions.clear()
+        self._cursor_by_forecast.clear()
+        self._dirty.clear()
+        self._outcome_records.clear()
+        self._invalid.clear()
+        self.identity_conflicts = 0
+        self.seal_conflicts = 0
+        self.outcome_conflicts = 0
+        self.invalid_compare = 0
+        self.evidence_comparisons = 0
+
     def _rebuild(self) -> None:
         """Rebuild all derived state from the three ledgers.
 
@@ -125,8 +163,11 @@ class Substrate:
         The one intentional exception is schema versioning: a record from a
         NEWER writer fails loud (G4), because silently misreading a future
         format is how corruption enters a calibration feed."""
+        for ledger in (self.forecasts_l, self.evidence_l, self.outcomes_l):
+            ledger.reset_semantic_corruption()
+        self._clear_derived_state()
         pending_amendments: list[tuple[ExposureAmendment | None, str | None]] = []
-        for record in self.forecasts_l.raw():
+        for record in self.forecasts_l.snapshot():
             version = self._record_version(record, self.forecasts_l)
             if version is None:
                 pending_amendments.append((None, record.get("forecast_id")))
@@ -138,7 +179,7 @@ class Substrate:
                     "exposure_basis",
                     "world_commitment",
                 }.intersection(payload):
-                    self.forecasts_l.corrupted += 1
+                    self.forecasts_l.mark_semantic_corruption()
                     pending_amendments.append((None, payload.get("forecast_id")))
                     continue
                 record_kind = _FORECAST_KIND
@@ -148,14 +189,14 @@ class Substrate:
                 try:
                     forecast = forecast_from_dict(payload, schema_version=version)
                 except (KeyError, TypeError, ValueError):
-                    self.forecasts_l.corrupted += 1
+                    self.forecasts_l.mark_semantic_corruption()
                     pending_amendments.append((None, payload.get("forecast_id")))
                     continue
                 if forecast.forecast_id in self.forecasts:
                     # Forecast identity is first-write authoritative.  A
                     # conflicting later declaration makes the identity unsafe
                     # for calibration but never replaces history.
-                    self.forecasts_l.corrupted += 1
+                    self.forecasts_l.mark_semantic_corruption()
                     self._quarantine_exposure(forecast.forecast_id)
                     continue
                 if (
@@ -163,7 +204,7 @@ class Substrate:
                     and forecast.exposure is Exposure.BLIND
                     and forecast.structural_exposure is not Exposure.BLIND
                 ):
-                    self.forecasts_l.corrupted += 1
+                    self.forecasts_l.mark_semantic_corruption()
                     self._exposure_quarantined.add(forecast.forecast_id)
                 self._register(
                     forecast,
@@ -175,12 +216,12 @@ class Substrate:
                 try:
                     amendment = exposure_amendment_from_dict(payload)
                 except (KeyError, TypeError, ValueError):
-                    self.forecasts_l.corrupted += 1
+                    self.forecasts_l.mark_semantic_corruption()
                     pending_amendments.append((None, target_hint))
                     continue
                 pending_amendments.append((amendment, amendment.forecast_id))
             else:
-                self.forecasts_l.corrupted += 1
+                self.forecasts_l.mark_semantic_corruption()
                 target_hint = payload.get("forecast_id")
                 pending_amendments.append((None, target_hint))
 
@@ -193,10 +234,10 @@ class Substrate:
                 continue
             self._apply_amendment(amendment, rebuilding=True)
 
-        for record in self.evidence_l.raw():
+        for record in self.evidence_l.snapshot():
             self._ingest_evidence_record(record, rebuilding=True)
 
-        for record in self.outcomes_l.raw():
+        for record in self.outcomes_l.snapshot():
             self._ingest_outcome_record(record, rebuilding=True)
 
         # Rebuild cursors only for work that can still change. Settled
@@ -220,7 +261,7 @@ class Substrate:
             or not isinstance(version, int)
             or version <= 0
         ):
-            ledger.corrupted += 1
+            ledger.mark_semantic_corruption()
             return None
         if version > _SCHEMA_V2:
             raise ValueError(
@@ -248,7 +289,9 @@ class Substrate:
     @staticmethod
     def _strict_value(value: object, value_type: str) -> bool:
         expected = _VALUE_TYPES.get(value_type)
-        return expected is not None and type(value) is expected
+        if expected is None or type(value) is not expected:
+            return False
+        return expected is not float or math.isfinite(value)
 
     @staticmethod
     def _timestamp_is_aware(value: object) -> bool:
@@ -379,35 +422,35 @@ class Substrate:
             try:
                 event = observation_from_dict(payload)
             except (KeyError, TypeError, ValueError):
-                self.evidence_l.corrupted += 1
+                self.evidence_l.mark_semantic_corruption()
                 self._mark_raw_stream_invalid(payload)
                 return
             if not self._event_well_formed(event):
-                self.evidence_l.corrupted += 1
+                self.evidence_l.mark_semantic_corruption()
                 self._mark_raw_stream_invalid(payload)
                 return
             before = self.identity_conflicts
             self._ingest_observation(event, record)
             if rebuilding and self.identity_conflicts > before:
-                self.evidence_l.corrupted += 1
+                self.evidence_l.mark_semantic_corruption()
             return
         if kind == "seal":
             try:
                 seal = seal_from_dict(payload, schema_version=version)
             except (KeyError, TypeError, ValueError):
-                self.evidence_l.corrupted += 1
+                self.evidence_l.mark_semantic_corruption()
                 self._mark_raw_stream_invalid(payload)
                 return
             if not self._seal_well_formed(seal):
-                self.evidence_l.corrupted += 1
+                self.evidence_l.mark_semantic_corruption()
                 self._mark_raw_stream_invalid(payload)
                 return
             before = self.seal_conflicts
             self._ingest_seal(seal, record, version)
             if rebuilding and self.seal_conflicts > before:
-                self.evidence_l.corrupted += 1
+                self.evidence_l.mark_semantic_corruption()
             return
-        self.evidence_l.corrupted += 1
+        self.evidence_l.mark_semantic_corruption()
         self._mark_raw_stream_invalid(payload)
 
     def _merge_evidence_tail(self, records: tuple[dict, ...]) -> None:
@@ -415,7 +458,11 @@ class Substrate:
             self._ingest_evidence_record(record, rebuilding=False)
 
     def _sync_evidence_tail(self) -> None:
-        self._merge_evidence_tail(self.evidence_l.synchronize())
+        self._apply_sync_batch(
+            self.evidence_l,
+            self.evidence_l.synchronize(),
+            self._merge_evidence_tail,
+        )
 
     def _decode_outcome_record(self, record: dict) -> Outcome | None:
         version = self._record_version(record, self.outcomes_l)
@@ -425,12 +472,12 @@ class Substrate:
         if (version == 1 and kind is not None) or (
             version == _SCHEMA_V2 and kind != _OUTCOME_KIND
         ):
-            self.outcomes_l.corrupted += 1
+            self.outcomes_l.mark_semantic_corruption()
             return None
         try:
             return outcome_from_dict(_without_envelope(record))
         except (KeyError, TypeError, ValueError):
-            self.outcomes_l.corrupted += 1
+            self.outcomes_l.mark_semantic_corruption()
             return None
 
     def _ingest_outcome_record(self, record: dict, *, rebuilding: bool) -> None:
@@ -438,7 +485,7 @@ class Substrate:
         if outcome is None:
             return
         if outcome.forecast_id not in self.forecasts:
-            self.outcomes_l.corrupted += 1
+            self.outcomes_l.mark_semantic_corruption()
             return
         history = self._outcome_records.setdefault(outcome.forecast_id, [])
         canonical = _canonical_json(record)
@@ -453,7 +500,7 @@ class Substrate:
         if not allowed:
             self.outcome_conflicts += 1
             if rebuilding:
-                self.outcomes_l.corrupted += 1
+                self.outcomes_l.mark_semantic_corruption()
             return
 
         history.append(dict(record))
@@ -466,7 +513,11 @@ class Substrate:
             self._ingest_outcome_record(record, rebuilding=False)
 
     def _sync_outcome_tail(self) -> None:
-        self._merge_outcome_tail(self.outcomes_l.synchronize())
+        self._apply_sync_batch(
+            self.outcomes_l,
+            self.outcomes_l.synchronize(),
+            self._merge_outcome_tail,
+        )
 
     def _register(self, f: Forecast, *, version: int, digest: str) -> None:
         self.forecasts[f.forecast_id] = f
@@ -528,18 +579,25 @@ class Substrate:
         ):
             raise ValueError("BLIND forecast requires a complete, disjoint exposure basis")
         validate_world_contract(detached, schema_version=_SCHEMA_V2)
+        self._sync_forecast_tail()
         if detached.forecast_id in self.forecasts:
             raise ValueError(f"forecast {detached.forecast_id} already exists")
-        self.forecasts_l.append_dict(payload)
-        self._register(
-            detached,
-            version=_SCHEMA_V2,
-            digest=_canonical_record_digest(payload),
+        result = self.forecasts_l.append_unique(
+            payload,
+            ("_kind", "forecast_id"),
         )
+        self._apply_append_result(
+            self.forecasts_l,
+            result,
+            self._merge_forecast_tail,
+        )
+        if result.conflict or not result.appended:
+            raise ValueError(f"forecast {detached.forecast_id} already exists")
         return detached.forecast_id
 
     def forecast_digest(self, forecast_id: str) -> str:
         """Canonical digest to which an exposure amendment must bind."""
+        self._sync_forecast_tail()
         try:
             return self._forecast_digests[forecast_id]
         except KeyError:
@@ -547,6 +605,7 @@ class Substrate:
 
     def effective_exposure(self, forecast_id: str) -> Exposure:
         """Exposure after structural validation and monotone amendments."""
+        self._sync_forecast_tail()
         try:
             return self._effective_exposure[forecast_id]
         except KeyError:
@@ -561,6 +620,7 @@ class Substrate:
         """
         if not isinstance(amendment, ExposureAmendment):
             raise TypeError("amend_exposure() requires an ExposureAmendment")
+        self._sync_forecast_tail()
         payload = _tag_v2(amendment, _AMENDMENT_KIND)
         detached = exposure_amendment_from_dict(_without_envelope(payload))
         error = self._amendment_error(detached)
@@ -574,7 +634,11 @@ class Substrate:
         # compare_and_append synchronized the complete durable tail under the
         # same lock as its decision.  Merge every discovered record, not just
         # our candidate, so a race cannot disappear until restart.
-        self._merge_forecast_tail(result.records)
+        self._apply_append_result(
+            self.forecasts_l,
+            result,
+            self._merge_forecast_tail,
+        )
         if result.conflict:
             raise ValueError("conflicting exposure amendment transition")
 
@@ -604,7 +668,7 @@ class Substrate:
             if amendment.forecast_id in self.forecasts:
                 self._quarantine_exposure(amendment.forecast_id)
             if rebuilding:
-                self.forecasts_l.corrupted += 1
+                self.forecasts_l.mark_semantic_corruption()
                 return False
             raise ValueError(error)
         if amendment not in self.amendments:
@@ -630,7 +694,7 @@ class Substrate:
                     "exposure_basis",
                     "world_commitment",
                 }.intersection(payload):
-                    self.forecasts_l.corrupted += 1
+                    self.forecasts_l.mark_semantic_corruption()
                     pending.append((None, payload.get("forecast_id")))
                     continue
                 record_kind = _FORECAST_KIND
@@ -641,14 +705,14 @@ class Substrate:
                 try:
                     forecast = forecast_from_dict(payload, schema_version=version)
                 except (KeyError, TypeError, ValueError):
-                    self.forecasts_l.corrupted += 1
+                    self.forecasts_l.mark_semantic_corruption()
                     pending.append((None, payload.get("forecast_id")))
                     continue
                 digest = _canonical_record_digest(record)
                 existing_digest = self._forecast_digests.get(forecast.forecast_id)
                 if existing_digest is not None:
                     if existing_digest != digest:
-                        self.forecasts_l.corrupted += 1
+                        self.forecasts_l.mark_semantic_corruption()
                         self._quarantine_exposure(forecast.forecast_id)
                     continue
                 if (
@@ -656,7 +720,7 @@ class Substrate:
                     and forecast.exposure is Exposure.BLIND
                     and forecast.structural_exposure is not Exposure.BLIND
                 ):
-                    self.forecasts_l.corrupted += 1
+                    self.forecasts_l.mark_semantic_corruption()
                     self._exposure_quarantined.add(forecast.forecast_id)
                 self._register(forecast, version=version, digest=digest)
             elif version == _SCHEMA_V2 and record_kind == _AMENDMENT_KIND:
@@ -664,12 +728,12 @@ class Substrate:
                 try:
                     decoded = exposure_amendment_from_dict(payload)
                 except (KeyError, TypeError, ValueError):
-                    self.forecasts_l.corrupted += 1
+                    self.forecasts_l.mark_semantic_corruption()
                     pending.append((None, target_hint))
                     continue
                 pending.append((decoded, decoded.forecast_id))
             else:
-                self.forecasts_l.corrupted += 1
+                self.forecasts_l.mark_semantic_corruption()
                 pending.append((None, payload.get("forecast_id")))
 
         for discovered, target_hint in pending:
@@ -678,6 +742,65 @@ class Substrate:
                     self._quarantine_exposure(target_hint)
                 continue
             self._apply_amendment(discovered, rebuilding=True)
+
+    def _rebuild_after_reset(self, reset_ledger: Ledger) -> None:
+        """Replace derived state after one ledger changed generation.
+
+        The resetting ledger already owns a complete in-memory snapshot. Sync
+        the other two once, then rebuild from all three snapshots without a
+        second disk scan.
+        """
+
+        for ledger in (self.forecasts_l, self.evidence_l, self.outcomes_l):
+            if ledger is not reset_ledger:
+                ledger.synchronize()
+        self._rebuild()
+
+    def _apply_sync_batch(
+        self,
+        ledger: Ledger,
+        batch: LedgerSyncResult,
+        merge,
+    ) -> None:
+        if batch.reset:
+            self._rebuild_after_reset(ledger)
+            return
+        merge(batch.records)
+
+    def _apply_append_result(
+        self,
+        ledger: Ledger,
+        result: AtomicAppendResult,
+        merge,
+    ) -> None:
+        self._apply_sync_batch(
+            ledger,
+            LedgerSyncResult(records=result.records, reset=result.reset),
+            merge,
+        )
+
+    def _sync_forecast_tail(self) -> None:
+        self._apply_sync_batch(
+            self.forecasts_l,
+            self.forecasts_l.synchronize(),
+            self._merge_forecast_tail,
+        )
+
+    def _sync_all_tails(self) -> None:
+        """Synchronize every ledger once, folding forecasts before decisions."""
+
+        batches = (
+            (self.forecasts_l, self.forecasts_l.synchronize(), self._merge_forecast_tail),
+            (self.evidence_l, self.evidence_l.synchronize(), self._merge_evidence_tail),
+            (self.outcomes_l, self.outcomes_l.synchronize(), self._merge_outcome_tail),
+        )
+        if any(batch.reset for _ledger, batch, _merge in batches):
+            # Every Ledger snapshot is already current at its synchronization
+            # boundary; no additional read is necessary.
+            self._rebuild()
+            return
+        for _ledger, batch, merge in batches:
+            merge(batch.records)
 
     def _quarantine_exposure(self, forecast_id: str) -> None:
         self._exposure_quarantined.add(forecast_id)
@@ -710,7 +833,11 @@ class Substrate:
                 result = self.evidence_l.sync_observation_once(
                     payload, detached.dedup_key
                 )
-                self._merge_evidence_tail(result.records)
+                self._apply_append_result(
+                    self.evidence_l,
+                    result,
+                    self._merge_evidence_tail,
+                )
                 if result.conflict:
                     self.identity_conflicts += 1
                     self._mark_raw_stream_invalid(payload)
@@ -732,7 +859,11 @@ class Substrate:
                 result = self.evidence_l.append_unique(
                     payload, ("_kind", "source_ref", "epoch_ref")
                 )
-                self._merge_evidence_tail(result.records)
+                self._apply_append_result(
+                    self.evidence_l,
+                    result,
+                    self._merge_evidence_tail,
+                )
                 if result.conflict:
                     self.seal_conflicts += 1
                     self._mark_raw_stream_invalid(payload)
@@ -764,8 +895,7 @@ class Substrate:
         try:
             # A process may have been idle while another host captured or
             # resolved. Synchronize durable tails before making any decision.
-            self._sync_evidence_tail()
-            self._sync_outcome_tail()
+            self._sync_all_tails()
             produced += self._resolve_from_evidence()
             produced += self._sweep_expired(at)
         except Exception:                 # noqa: BLE001 -- OUTWARD law
@@ -860,7 +990,8 @@ class Substrate:
 
         produced: list[Outcome] = []
         for fid, f in self.forecasts.items():
-            if fid in self.outcomes:
+            existing = self.outcomes.get(fid)
+            if existing is not None and existing.terminal is not Terminal.UNRESOLVABLE:
                 continue
             if parse(at) <= parse(f.resolution.horizon):
                 continue
@@ -897,6 +1028,15 @@ class Substrate:
                     ),
                     calibration_eligible=False,
                 )
+            # A provisional closure is already the durable statement that
+            # completeness is unknown. Repeated sweeps must not append an
+            # equivalent provisional record; only newly sufficient evidence
+            # may advance it to the one settled outcome.
+            if (
+                existing is not None
+                and candidate.terminal is Terminal.UNRESOLVABLE
+            ):
+                continue
             authoritative, appended = self._emit(candidate)
             if authoritative is not None and appended:
                 produced.append(authoritative)
@@ -928,6 +1068,11 @@ class Substrate:
             if source_ref not in allowed:
                 continue                        # not this observable's channel
             if not self._seal_well_formed(seal):
+                continue
+            try:
+                if parse(f.created_at) >= parse(seal.sealed_at):
+                    continue                    # completion evidence must follow the claim
+            except (TypeError, ValueError):
                 continue
             stream_key = (source_ref, epoch_ref, seal.subject_ref)
             if stream_key in self._sequence_invalid:
@@ -965,14 +1110,21 @@ class Substrate:
                     isinstance(version, bool)
                     or not isinstance(version, int)
                     or version <= 0
-                    or version > _SCHEMA_V2
                     or (version == 1 and kind is not None)
                     or (version == _SCHEMA_V2 and kind != _OUTCOME_KIND)
                 ):
+                    continue
+                if version > _SCHEMA_V2:
                     return False
-                terminals.append(Terminal(record.get("terminal")))
-            candidate_terminal = Terminal(candidate.get("terminal"))
-        except (TypeError, ValueError):
+                try:
+                    decoded = outcome_from_dict(_without_envelope(record))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                terminals.append(decoded.terminal)
+            candidate_terminal = outcome_from_dict(
+                _without_envelope(candidate)
+            ).terminal
+        except (KeyError, TypeError, ValueError):
             return False
         if any(terminal is not Terminal.UNRESOLVABLE for terminal in terminals):
             return False
@@ -986,7 +1138,11 @@ class Substrate:
             ("forecast_id",),
             self._outcome_transition_allowed,
         )
-        self._merge_outcome_tail(result.records)
+        self._apply_append_result(
+            self.outcomes_l,
+            result,
+            self._merge_outcome_tail,
+        )
         if result.conflict:
             self.outcome_conflicts += 1
         return self.outcomes.get(detached.forecast_id), result.appended
@@ -1008,10 +1164,14 @@ class Substrate:
         Separating closure from scoreability from capture integrity is what
         lets 'closure 99%, scoreable 71%, drop 0.1%' be told apart from
         'closure 72%, scoreable 71%, drop 27%'. Very different failures."""
+        try:
+            self._sync_all_tails()
+        except Exception:                 # noqa: BLE001 -- health is outward-facing
+            self.process_errors += 1
         at = at or now()
         try:
             parsed_at = parse(at)
-        except ValueError:
+        except (TypeError, ValueError):
             parsed_at = parse(now())            # a broken clock is still a clock
         due = [f for f in self.forecasts.values()
                if parsed_at > parse(f.resolution.horizon)]
@@ -1041,6 +1201,11 @@ class Substrate:
                     self.forecasts_l.tail_loss
                     + self.evidence_l.tail_loss
                     + self.outcomes_l.tail_loss
+                ),
+                "generation_resets": (
+                    self.forecasts_l.generation_resets
+                    + self.evidence_l.generation_resets
+                    + self.outcomes_l.generation_resets
                 ),
                 "corrupted": (
                     self.forecasts_l.corrupted

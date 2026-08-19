@@ -8,10 +8,14 @@ from pathlib import Path
 import pytest
 
 from hanish.receipts import (
+    CalibrationBatch,
+    CalibrationExposureAmendment,
+    CalibrationSample,
     PathChange,
     ReceiptError,
     build_manifest,
     canonical_json_bytes,
+    iter_eligible_calibration_samples,
     load_exclusions,
     receipt_directory_name,
     validate_exclusion_prefix,
@@ -22,6 +26,20 @@ from hanish.receipts import (
 ROOT = Path(__file__).resolve().parents[1]
 EXCLUSIONS = ROOT / "experiments" / "calibration-exclusions.jsonl"
 HISTORICAL_KEY = ("github:JosephOIbrahim/Hanish", "f_c57a1c3bc61f")
+
+
+class StubProvider:
+    def __init__(self, batch=None, *, error=None, calls=None, name="provider"):
+        self.batch = batch
+        self.error = error
+        self.calls = calls if calls is not None else []
+        self.name = name
+
+    def load_validated_calibration(self):
+        self.calls.append(self.name)
+        if self.error is not None:
+            raise self.error
+        return self.batch
 
 
 def _exclusion_value() -> dict:
@@ -58,6 +76,93 @@ def test_historical_exclusion_is_strict_and_effective_without_raw_digest():
     assert record.raw_ledger_available is False
     assert record.target_record_sha256 is None
     assert len(record.citations) == 5
+
+
+def test_calibration_corpus_validates_every_input_before_returning_an_iterator():
+    calls = []
+    excluded = CalibrationSample(*HISTORICAL_KEY, exposure="BLIND", payload="old")
+    eligible = CalibrationSample(
+        "github:JosephOIbrahim/Hanish",
+        "f_independent",
+        exposure="BLIND",
+        payload="new",
+    )
+    providers = [
+        StubProvider(CalibrationBatch((excluded,)), calls=calls, name="first"),
+        StubProvider(CalibrationBatch((eligible,)), calls=calls, name="second"),
+    ]
+
+    iterator = iter_eligible_calibration_samples(EXCLUSIONS, providers)
+
+    assert calls == ["first", "second"]
+    assert list(iterator) == [eligible]
+
+
+def test_one_corrupt_calibration_input_blocks_the_whole_corpus():
+    sample = CalibrationSample(
+        "github:JosephOIbrahim/Hanish",
+        "f_would_have_been_eligible",
+        exposure="BLIND",
+        payload=True,
+    )
+    providers = [
+        StubProvider(CalibrationBatch((sample,))),
+        StubProvider(error=ReceiptError("corrupt receipt")),
+    ]
+
+    with pytest.raises(ReceiptError, match="corrupt receipt"):
+        iter_eligible_calibration_samples(EXCLUSIONS, providers)
+
+
+def test_exposed_and_monotonically_amended_samples_never_enter_calibration():
+    repository = "github:JosephOIbrahim/Hanish"
+    structurally_exposed = CalibrationSample(
+        repository,
+        "f_exposed",
+        exposure="EXPOSED",
+        payload=1,
+    )
+    amended = CalibrationSample(
+        repository,
+        "f_amended",
+        exposure="BLIND",
+        payload=2,
+    )
+    batch = CalibrationBatch(
+        (structurally_exposed, amended),
+        (CalibrationExposureAmendment(repository, amended.forecast_id),),
+    )
+
+    assert list(
+        iter_eligible_calibration_samples(EXCLUSIONS, [StubProvider(batch)])
+    ) == []
+    with pytest.raises(ReceiptError, match="only calibration amendment"):
+        CalibrationExposureAmendment(
+            repository,
+            amended.forecast_id,
+            from_exposure="EXPOSED",
+            to_exposure="BLIND",
+        )
+
+
+def test_digestless_historical_exclusion_matches_repository_and_forecast():
+    sample = CalibrationSample(*HISTORICAL_KEY, exposure="BLIND", payload={"score": 1})
+    batch = CalibrationBatch((sample,))
+
+    assert list(
+        iter_eligible_calibration_samples(EXCLUSIONS, [StubProvider(batch)])
+    ) == []
+
+
+def test_malformed_registry_blocks_corpus_before_any_provider_is_loaded(tmp_path):
+    malformed = tmp_path / "calibration-exclusions.jsonl"
+    malformed.write_bytes(b'{"_kind":"calibration_exclusion"}')
+    calls = []
+    provider = StubProvider(CalibrationBatch(()), calls=calls)
+
+    with pytest.raises(ReceiptError, match="newline terminated"):
+        iter_eligible_calibration_samples(malformed, [provider])
+    assert calls == []
 
 
 def test_exclusion_fold_is_monotone_for_later_records():

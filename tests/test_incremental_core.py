@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 
 import pytest
@@ -12,6 +13,8 @@ from hanish.future.claims import (
     Comparator,
     EmissionSemantics,
     Exposure,
+    ExposureAmendment,
+    ExposureBasis,
     Forecast,
     ObservableSpec,
     ResolutionSpec,
@@ -24,7 +27,7 @@ from hanish.past.events import (
     Validity,
     Verdict,
 )
-from hanish.past.ledger import to_json
+from hanish.past.ledger import Ledger, to_json
 
 SOURCE = "host:fixture"
 SUBJECT = "subject:fixture"
@@ -72,6 +75,34 @@ def forecast(
             comparator=Comparator.EQ,
             threshold=True,
             horizon=horizon,
+        ),
+    )
+
+
+def blind_forecast(*, forecast_id: str = "f_blind_incremental") -> Forecast:
+    return Forecast(
+        subject_ref=SUBJECT,
+        claim="the fixture result is true",
+        probability=0.6,
+        exposure=Exposure.BLIND,
+        exposure_basis=ExposureBasis(
+            author_ref="author:fixture",
+            seen_by=(),
+            capable_actors=("actor:target",),
+            seen_by_complete=True,
+            capable_actors_complete=True,
+            separation_control_ref="control:fixture",
+            attested_by="host:fixture",
+            attested_at=CREATED,
+        ),
+        authored_by="author:fixture",
+        forecast_id=forecast_id,
+        created_at=CREATED,
+        resolution=ResolutionSpec(
+            observable=RESULT,
+            comparator=Comparator.EQ,
+            threshold=True,
+            horizon=HORIZON,
         ),
     )
 
@@ -145,6 +176,91 @@ def test_capture_race_loser_ingests_winner_without_restart(tmp_path):
     assert second.process(at="2026-01-01T01:30:00+00:00")[0].verdict is Verdict.HIT
 
 
+def test_cross_process_exposure_amendment_is_folded_before_next_decision(tmp_path):
+    first = Substrate(tmp_path, observables=specs())
+    forecast_id = first.author(blind_forecast())
+    second = Substrate(tmp_path, observables=specs())
+    assert first.capture(event("blind-result"))
+    assert first.process(at="2026-01-01T01:30:00+00:00")[0].calibration_eligible
+
+    second.amend_exposure(
+        ExposureAmendment(
+            forecast_id=forecast_id,
+            target_forecast_digest=second.forecast_digest(forecast_id),
+            reason_code="EXPOSURE_DISCOVERED",
+            amended_by="host:fixture",
+            amended_at="2026-01-01T01:31:00+00:00",
+        )
+    )
+
+    assert first.process(at="2026-01-01T01:32:00+00:00") == []
+    assert first.effective_exposure(forecast_id) is Exposure.EXPOSED
+    assert not first.outcomes[forecast_id].calibration_eligible
+    assert len(first.amendments) == 1
+    assert len(list(first.outcomes_l.raw())) == 1
+
+
+@pytest.mark.parametrize("mode", ["truncate", "replace"])
+def test_generation_reset_replaces_evidence_and_outcome_state_without_ghosts(
+    tmp_path,
+    mode,
+):
+    substrate = Substrate(tmp_path, observables=specs())
+    forecast_id = substrate.author(forecast())
+    assert substrate.capture(event("old-generation"))
+    assert substrate.process(at="2026-01-01T01:30:00+00:00")[0].verdict is Verdict.HIT
+
+    for name in ("evidence.jsonl", "outcomes.jsonl"):
+        path = tmp_path / name
+        if mode == "truncate":
+            path.write_bytes(b"")
+        else:
+            replacement = tmp_path / f"{name}.replacement"
+            replacement.write_bytes(b"")
+            replacement.replace(path)
+
+    assert substrate.process(at="2026-01-01T01:31:00+00:00") == []
+    assert substrate._observations == []
+    assert forecast_id not in substrate.outcomes
+    assert substrate.status(at="2026-01-01T01:31:00+00:00")["capture"][
+        "generation_resets"
+    ] == 2
+
+    assert substrate.capture(event("new-generation"))
+    assert substrate.process(at="2026-01-01T01:32:00+00:00")[0].verdict is Verdict.HIT
+
+
+def test_forecast_generation_reset_removes_forecast_and_dependent_outcome_ghosts(tmp_path):
+    substrate = Substrate(tmp_path, observables=specs())
+    forecast_id = substrate.author(forecast())
+    assert substrate.capture(event("old-forecast"))
+    assert substrate.process(at="2026-01-01T01:30:00+00:00")[0].verdict is Verdict.HIT
+    replacement = tmp_path / "forecasts.replacement"
+    replacement.write_bytes(b"")
+    replacement.replace(tmp_path / "forecasts.jsonl")
+
+    assert substrate.process(at="2026-01-01T01:31:00+00:00") == []
+    assert forecast_id not in substrate.forecasts
+    assert forecast_id not in substrate.outcomes
+    assert substrate.forecasts_l.generation_resets == 1
+
+
+def test_generation_reset_recounts_semantic_damage_once(tmp_path):
+    path = tmp_path / "forecasts.jsonl"
+    Ledger(path).append_dict({"_v": 0, "forecast_id": "f_corrupt"})
+    substrate = Substrate(tmp_path, observables=specs())
+    assert substrate.forecasts_l.corrupted == 1
+    original = path.stat()
+    os.utime(
+        path,
+        ns=(original.st_atime_ns, original.st_mtime_ns + 1_000_000_000),
+    )
+
+    assert substrate.process(at="2026-01-01T01:30:00+00:00") == []
+    assert substrate.forecasts_l.generation_resets == 1
+    assert substrate.forecasts_l.corrupted == 1
+
+
 def test_reused_event_identity_with_different_content_fails_closed(tmp_path):
     substrate = Substrate(tmp_path, observables=specs())
     forecast_id = substrate.author(forecast())
@@ -173,6 +289,58 @@ def test_duplicate_sequence_cannot_certify_completeness(tmp_path):
 
     substrate.process(at=AFTER)
     assert substrate.outcomes[forecast_id].terminal is Terminal.UNRESOLVABLE
+
+
+@pytest.mark.parametrize(
+    "sealed_at",
+    ["2025-12-31T23:59:59+00:00", CREATED],
+)
+def test_seal_must_postdate_forecast_to_certify_absence(tmp_path, sealed_at):
+    substrate = Substrate(tmp_path, observables=specs())
+    forecast_id = substrate.author(forecast())
+    assert substrate.capture(
+        CompletenessSeal(
+            source_ref=SOURCE,
+            epoch_ref=EPOCH,
+            subject_ref=SUBJECT,
+            final_source_seq=0,
+            sealed_at=sealed_at,
+        )
+    )
+
+    substrate.process(at=AFTER)
+
+    assert substrate.outcomes[forecast_id].terminal is Terminal.UNRESOLVABLE
+    assert substrate.outcomes[forecast_id].verdict is None
+
+
+def test_late_complete_seal_advances_one_provisional_outcome_to_miss(tmp_path):
+    substrate = Substrate(tmp_path, observables=specs())
+    forecast_id = substrate.author(forecast())
+
+    first = substrate.process(at=AFTER)
+    assert first[0].terminal is Terminal.UNRESOLVABLE
+    assert len(list(substrate.outcomes_l.raw())) == 1
+    assert substrate.process(at=AFTER) == []
+    assert len(list(substrate.outcomes_l.raw())) == 1
+
+    assert substrate.capture(
+        CompletenessSeal(
+            source_ref=SOURCE,
+            epoch_ref=EPOCH,
+            subject_ref=SUBJECT,
+            final_source_seq=0,
+            sealed_at="2026-01-01T02:01:00+00:00",
+        )
+    )
+    settled = substrate.process(at=AFTER)
+
+    assert settled[0].terminal is Terminal.RESOLVED
+    assert settled[0].verdict is Verdict.MISS
+    assert substrate.outcomes[forecast_id].verdict is Verdict.MISS
+    assert len(list(substrate.outcomes_l.raw())) == 2
+    assert substrate.process(at=AFTER) == []
+    assert len(list(substrate.outcomes_l.raw())) == 2
 
 
 @pytest.mark.parametrize("final_sequence", [-1, True, 1_000_001])

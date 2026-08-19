@@ -3,8 +3,9 @@
 This module is deliberately host-neutral and standard-library only.  It knows
 how to canonicalize JSON, bind a directory's payload bytes into a non-circular
 manifest, and apply the append-only calibration-exclusion policy.  Host
-adapters remain responsible for deciding which payloads a receipt requires and
-for replaying their semantics.
+adapters remain responsible for deciding which payloads a receipt requires,
+replaying their semantics, and returning a fully validated calibration batch.
+The corpus iterator materializes every such batch before it exposes one sample.
 
 ``manifest.json`` is not one of its own entries.  Instead ``manifest_root`` is
 the SHA-256 of the canonical, sorted entry list.  Git is the long-term
@@ -18,11 +19,11 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Protocol
 
 MANIFEST_FILENAME = "manifest.json"
 MANIFEST_KIND = "receipt_manifest"
@@ -109,6 +110,94 @@ class ExclusionRegistry:
     ) -> tuple[CalibrationExclusion, ...]:
         key = (repository_ref, forecast_id)
         return tuple(record for record in self.records if record.key == key)
+
+
+@dataclass(frozen=True)
+class CalibrationSample:
+    """Candidate whose exposure is the adapter-validated structural value."""
+
+    repository_ref: str
+    forecast_id: str
+    exposure: str
+    payload: object
+
+    def __post_init__(self) -> None:
+        _matching_string(
+            self.repository_ref,
+            _REPOSITORY_REF,
+            "calibration sample repository_ref",
+        )
+        _matching_string(
+            self.forecast_id,
+            _FORECAST_ID,
+            "calibration sample forecast_id",
+        )
+        if self.exposure not in {"BLIND", "EXPOSED"}:
+            raise ReceiptError("calibration sample exposure must be BLIND or EXPOSED")
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return (self.repository_ref, self.forecast_id)
+
+
+@dataclass(frozen=True)
+class CalibrationExposureAmendment:
+    """A monotone runtime correction; unexposing is not representable."""
+
+    repository_ref: str
+    forecast_id: str
+    from_exposure: str = "BLIND"
+    to_exposure: str = "EXPOSED"
+
+    def __post_init__(self) -> None:
+        _matching_string(
+            self.repository_ref,
+            _REPOSITORY_REF,
+            "calibration amendment repository_ref",
+        )
+        _matching_string(
+            self.forecast_id,
+            _FORECAST_ID,
+            "calibration amendment forecast_id",
+        )
+        if self.from_exposure != "BLIND" or self.to_exposure != "EXPOSED":
+            raise ReceiptError("the only calibration amendment is BLIND -> EXPOSED")
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return (self.repository_ref, self.forecast_id)
+
+
+@dataclass(frozen=True)
+class CalibrationBatch:
+    """Fully adapter-validated samples and their runtime amendments."""
+
+    samples: tuple[CalibrationSample, ...]
+    amendments: tuple[CalibrationExposureAmendment, ...] = ()
+
+    def __post_init__(self) -> None:
+        samples = tuple(self.samples)
+        amendments = tuple(self.amendments)
+        if any(not isinstance(sample, CalibrationSample) for sample in samples):
+            raise ReceiptError("calibration batch contains an invalid sample")
+        if any(
+            not isinstance(amendment, CalibrationExposureAmendment)
+            for amendment in amendments
+        ):
+            raise ReceiptError("calibration batch contains an invalid amendment")
+        object.__setattr__(self, "samples", samples)
+        object.__setattr__(self, "amendments", amendments)
+
+
+class CalibrationProvider(Protocol):
+    """Adapter boundary for fail-closed receipt validation and sample loading.
+
+    Providers translate host schemas into structural exposure plus any valid
+    runtime amendments; raw caller-provided exposure labels are not sufficient.
+    """
+
+    def load_validated_calibration(self) -> CalibrationBatch:
+        """Validate the complete input, then return its materialized batch."""
 
 
 @dataclass(frozen=True)
@@ -233,6 +322,60 @@ def load_exclusions(path: str | Path) -> ExclusionRegistry:
     except OSError as exc:
         raise ReceiptError(f"could not read exclusion registry {source}: {exc}") from exc
     return _load_exclusion_bytes(raw, str(source))
+
+
+def iter_eligible_calibration_samples(
+    exclusions: str | Path,
+    providers: Iterable[CalibrationProvider],
+) -> Iterator[CalibrationSample]:
+    """Return eligible samples only after every policy/input validates.
+
+    Receipt semantics stay adapter-owned: a provider must verify its whole
+    input before returning a ``CalibrationBatch``.  This function eagerly
+    obtains every batch, validates corpus-wide uniqueness, folds all exposure
+    amendments, and only then constructs the returned iterator.  Therefore a
+    corrupt registry or one corrupt provider prevents every sample from being
+    observed by the caller.
+    """
+
+    registry = load_exclusions(exclusions)
+    try:
+        materialized_providers = tuple(providers)
+    except Exception as exc:  # noqa: BLE001 - untrusted provider collection
+        raise ReceiptError("could not materialize calibration providers") from exc
+
+    batches: list[CalibrationBatch] = []
+    for index, provider in enumerate(materialized_providers):
+        loader = getattr(provider, "load_validated_calibration", None)
+        if not callable(loader):
+            raise ReceiptError(f"calibration provider {index} has no validation loader")
+        try:
+            batch = loader()
+        except ReceiptError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - adapter failures fail closed
+            raise ReceiptError(f"calibration provider {index} failed validation") from exc
+        if not isinstance(batch, CalibrationBatch):
+            raise ReceiptError(f"calibration provider {index} returned an invalid batch")
+        batches.append(batch)
+
+    samples = tuple(sample for batch in batches for sample in batch.samples)
+    keys = [sample.key for sample in samples]
+    if len(keys) != len(set(keys)):
+        raise ReceiptError("calibration corpus contains duplicate forecast coordinates")
+    exposed = {
+        amendment.key
+        for batch in batches
+        for amendment in batch.amendments
+    }
+    eligible = tuple(
+        sample
+        for sample in samples
+        if sample.exposure == "BLIND"
+        and sample.key not in exposed
+        and not registry.excludes(*sample.key)
+    )
+    return iter(eligible)
 
 
 def validate_exclusion_prefix(base: bytes, current: bytes) -> ExclusionRegistry:

@@ -121,3 +121,12 @@ def test_naive_horizon_rejected_at_authoring(tmp_path):
                 horizon=datetime.now().isoformat(),   # deliberately naive
             ),
         )
+
+
+def test_status_never_raises_on_a_non_string_clock(tmp_path):
+    """Health reporting treats a wrong-typed host clock like malformed text."""
+    _, sub, _ = build(tmp_path)
+
+    status = sub.status(at=["not", "a", "timestamp"])
+
+    assert status["capture"]["process_errors"] == 0
