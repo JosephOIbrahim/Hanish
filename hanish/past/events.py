@@ -35,7 +35,7 @@ class Verdict(StrEnum):
     MISS = "MISS"
 
 
-@dataclass
+@dataclass(frozen=True)
 class ObservationEvent:
     source_ref: str
     event_id: str

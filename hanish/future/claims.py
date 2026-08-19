@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -238,14 +239,28 @@ class Forecast:
             raise TypeError("resolution must be a ResolutionSpec")
         if not isinstance(self.assumptions, tuple):
             raise TypeError("assumptions must be a tuple")
+        if any(not isinstance(assumption, str) for assumption in self.assumptions):
+            raise TypeError("assumptions must contain only immutable strings")
         if self.exposure_basis is not None and not isinstance(
             self.exposure_basis, ExposureBasis
         ):
             raise TypeError("exposure_basis must be an ExposureBasis or None")
         if self.world_commitment is not None and not isinstance(self.world_commitment, str):
             raise TypeError("world_commitment must be canonical JSON text or None")
-        if not 0.0 <= self.probability <= 1.0:
+        if (
+            isinstance(self.probability, bool)
+            or not isinstance(self.probability, (int, float))
+            or not math.isfinite(self.probability)
+            or not 0.0 <= self.probability <= 1.0
+        ):
             raise ValueError("probability must be in [0, 1]")
+        for value, name in (
+            (self.subject_ref, "subject_ref"),
+            (self.claim, "claim"),
+            (self.authored_by, "authored_by"),
+            (self.forecast_id, "forecast_id"),
+        ):
+            _nonempty(value, f"forecast.{name}")
         if self.world_ref_capability is not WorldRefCapability.NONE and not self.world_ref:
             raise ValueError("host declared world_ref capability but supplied none")
         # A horizon must be parseable AND timezone-aware, or resolution would
@@ -257,6 +272,9 @@ class Forecast:
             raise ValueError("resolution.horizon must be an ISO 8601 timestamp") from None
         if horizon.tzinfo is None or horizon.utcoffset() is None:
             raise ValueError("resolution.horizon must be timezone-aware")
+        created = _aware_timestamp(self.created_at, "forecast.created_at")
+        if created >= horizon:
+            raise ValueError("forecast.created_at must precede resolution.horizon")
 
     @property
     def hindsight_unprotected(self) -> bool:

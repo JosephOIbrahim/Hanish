@@ -164,10 +164,19 @@ def test_valid_blind_and_explicit_exposed_are_structural(tmp_path):
 
 
 def test_author_registers_a_detached_canonical_forecast(tmp_path):
-    threshold = {"answer": [True]}
+    substrate = Substrate(tmp_path, observables=specs())
+    value = forecast(exposure=Exposure.EXPOSED, basis=None)
+    forecast_id = substrate.author(value)
+    assert substrate.forecasts[forecast_id] is not value
+    assert substrate.forecasts[forecast_id].resolution is not value.resolution
+    assert substrate.forecasts[forecast_id].resolution.threshold is True
+
+
+def test_author_rejects_mutable_or_wrongly_typed_thresholds(tmp_path):
+    substrate = Substrate(tmp_path, observables=specs())
     value = Forecast(
         subject_ref="subject:fixture",
-        claim="detached nested input",
+        claim="mutable threshold",
         probability=0.5,
         exposure=Exposure.EXPOSED,
         authored_by="forecaster",
@@ -175,16 +184,12 @@ def test_author_registers_a_detached_canonical_forecast(tmp_path):
         resolution=ResolutionSpec(
             observable=OBSERVABLE,
             comparator=Comparator.EQ,
-            threshold=threshold,
+            threshold={"answer": [True]},
             horizon=HORIZON,
         ),
     )
-    substrate = Substrate(tmp_path, observables=specs())
-    forecast_id = substrate.author(value)
-    threshold["answer"].append(False)
-    assert substrate.forecasts[forecast_id] is not value
-    assert substrate.forecasts[forecast_id].resolution.threshold is not threshold
-    assert substrate.forecasts[forecast_id].resolution.threshold == {"answer": [True]}
+    with pytest.raises(ValueError, match="strict type bool"):
+        substrate.author(value)
 
 
 def test_amendment_is_digest_bound_monotone_and_does_not_rewrite_outcome(tmp_path):
