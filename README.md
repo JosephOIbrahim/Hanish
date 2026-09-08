@@ -191,6 +191,13 @@ The prospective component formerly called **Prospect** is now **Hanish**.
 Historical wave prompts retain the former name as quoted provenance. The
 Moneta + Octavius + Hanish temporal ablation has not started.
 
+## SYNAPSE integration
+
+SYNAPSE v5.67.2 uses Hanish for an optional observational memory LOOP. The
+[integration record](docs/synapse-loop.md) documents the qualified sources,
+forecast/evidence contract and host-owned adapter. This does not start the
+separate temporal ablation or establish predictive calibration.
+
 ## Next
 
 - **V0.1** — done: the lattice, damage tolerance, cross-process once-only,
